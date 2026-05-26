@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SDR radio icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="64" fill="url(#bg)"/>
+  <rect x="72" y="164" width="368" height="240" rx="28" fill="#111827" stroke="#60a5fa" stroke-width="12"/>
+  <circle cx="170" cy="284" r="56" fill="#1d4ed8" stroke="#93c5fd" stroke-width="10"/>
+  <circle cx="170" cy="284" r="18" fill="#e0f2fe"/>
+  <rect x="250" y="224" width="154" height="26" rx="12" fill="#93c5fd"/>
+  <rect x="250" y="270" width="120" height="20" rx="10" fill="#60a5fa"/>
+  <rect x="250" y="304" width="90" height="20" rx="10" fill="#3b82f6"/>
+  <path d="M118 164 L246 78" stroke="#93c5fd" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="252" cy="74" r="14" fill="#e0f2fe"/>
+  <path d="M340 132c24 8 42 28 50 52" stroke="#bfdbfe" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <path d="M366 116c33 10 58 37 68 70" stroke="#93c5fd" stroke-width="8" fill="none" stroke-linecap="round"/>
+</svg>

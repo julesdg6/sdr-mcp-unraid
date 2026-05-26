@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SDR MCP square icon">
+  <rect width="512" height="512" rx="72" fill="#0b1020"/>
+  <rect x="56" y="156" width="400" height="264" rx="32" fill="#111827" stroke="#3b82f6" stroke-width="12"/>
+  <circle cx="172" cy="288" r="62" fill="#2563eb"/>
+  <circle cx="172" cy="288" r="24" fill="#dbeafe"/>
+  <rect x="262" y="230" width="152" height="24" rx="12" fill="#93c5fd"/>
+  <rect x="262" y="274" width="116" height="20" rx="10" fill="#60a5fa"/>
+  <rect x="262" y="308" width="88" height="18" rx="9" fill="#3b82f6"/>
+  <path d="M112 156 L254 70" stroke="#93c5fd" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="260" cy="66" r="14" fill="#dbeafe"/>
+</svg>

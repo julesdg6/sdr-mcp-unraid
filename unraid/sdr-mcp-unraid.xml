@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>sdr-mcp</Name>
+  <Repository>ghcr.io/julesdg6/sdr-mcp-unraid:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/julesdg6/sdr-mcp-unraid/issues</Support>
+  <Project>https://github.com/sandraschi/sdr-mcp</Project>
+  <Overview>Unraid packaging for SDR MCP. Provides MCP HTTP transport and SDR WebSocket streaming with persistent config and data paths.</Overview>
+  <Category>Network:Other Tools: Other</Category>
+  <WebUI>http://[IP]:[PORT:10891]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/julesdg6/sdr-mcp-unraid/main/unraid/sdr-mcp-unraid.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/julesdg6/sdr-mcp-unraid/main/assets/icon-square.svg</Icon>
+
+  <Config Name="WebUI Port" Target="10891" Default="10891" Mode="tcp" Description="MCP HTTP API port" Type="Port" Display="always" Required="true" Mask="false">10891</Config>
+  <Config Name="WebSocket Port" Target="8765" Default="8765" Mode="tcp" Description="Realtime SDR WebSocket stream port" Type="Port" Display="always" Required="true" Mask="false">8765</Config>
+
+  <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/sdr-mcp" Mode="rw" Description="Persistent app configuration path" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/sdr-mcp</Config>
+  <Config Name="Recordings Path" Target="/recordings" Default="/mnt/user/data/sdr-mcp/recordings" Mode="rw" Description="SDR recordings and exports" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/sdr-mcp/recordings</Config>
+  <Config Name="Data Path" Target="/data" Default="/mnt/user/data/sdr-mcp/data" Mode="rw" Description="Persistent SDR data and cache" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/sdr-mcp/data</Config>
+
+  <Config Name="MCP Transport" Target="MCP_TRANSPORT" Default="http" Mode="" Description="Set to http (recommended) or stdio" Type="Variable" Display="advanced" Required="true" Mask="false">http</Config>
+  <Config Name="MCP Host" Target="MCP_HOST" Default="0.0.0.0" Mode="" Description="HTTP bind host" Type="Variable" Display="advanced" Required="true" Mask="false">0.0.0.0</Config>
+  <Config Name="MCP Port Variable" Target="MCP_PORT" Default="10891" Mode="" Description="HTTP bind port inside container" Type="Variable" Display="advanced" Required="true" Mask="false">10891</Config>
+  <Config Name="Extra Parameters" Target="ExtraParams" Default="--device=/dev/bus/usb/001/002 --security-opt=no-new-privileges:true" Mode="" Description="Example RTL-SDR device passthrough. Add --privileged=true only if required." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+</Container>

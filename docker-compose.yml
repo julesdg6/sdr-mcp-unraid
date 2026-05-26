@@ -1,0 +1,20 @@
+services:
+  sdr-mcp:
+    image: ghcr.io/julesdg6/sdr-mcp-unraid:latest
+    container_name: sdr-mcp
+    restart: unless-stopped
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 10891
+    ports:
+      - "10891:10891"
+      - "8765:8765"
+    volumes:
+      - /mnt/user/appdata/sdr-mcp:/config
+      - /mnt/user/data/sdr-mcp/recordings:/recordings
+      - /mnt/user/data/sdr-mcp/data:/data
+    # Optional USB passthrough examples:
+    # devices:
+    #   - /dev/bus/usb/001/002:/dev/bus/usb/001/002
+    # privileged: true
