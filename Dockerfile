@@ -10,7 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
-    MCP_PORT=10891
+    MCP_PORT=10891 \
+    FRONTEND_PORT=8766
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -39,10 +40,11 @@ RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-
         "prefab-ui>=0.14.0"
 
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY web/dashboard /opt/web_sota
 RUN chmod +x /entrypoint.sh
 
 VOLUME ["/config", "/recordings", "/data"]
-EXPOSE 10891 8765
+EXPOSE 10891 8766
 
 USER appuser
 WORKDIR /config

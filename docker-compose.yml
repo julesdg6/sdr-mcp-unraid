@@ -7,9 +7,10 @@ services:
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: 10891
+      FRONTEND_PORT: 8766
     ports:
       - "10891:10891"
-      - "8765:8765"
+      - "8766:8766"
     volumes:
       - /mnt/user/appdata/sdr-mcp:/config
       - /mnt/user/data/sdr-mcp/recordings:/recordings
