@@ -24,7 +24,19 @@ RUN useradd -m -u 1000 -s /bin/bash appuser \
     && mkdir -p /config /recordings /data \
     && chown -R appuser:appuser /config /recordings /data
 
-RUN pip install --no-cache-dir "git+https://github.com/sandraschi/sdr-mcp.git@master"
+ARG SDR_MCP_REF=8ef69e5c385f46aa640b15089b4a1e9b960385fa
+RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-mcp.git@${SDR_MCP_REF}" \
+    && pip install --no-cache-dir \
+        "fastmcp>=3.2.0,<4" \
+        "httpx>=0.27.0,<1.0.0" \
+        "pyrtlsdr>=0.3.0,<1.0.0" \
+        "numpy>=1.21.0,<2.0.0" \
+        "scipy>=1.7.0,<2.0.0" \
+        "websockets>=15.0.1" \
+        "pydantic>=2.0.0,<3.0.0" \
+        "click>=8.0.0,<9.0.0" \
+        "rich>=13.0.0,<14.0.0" \
+        "prefab-ui>=0.14.0"
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
