@@ -1,11 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SDR MCP square icon">
-  <rect width="512" height="512" rx="72" fill="#0b1020"/>
-  <rect x="56" y="156" width="400" height="264" rx="32" fill="#111827" stroke="#3b82f6" stroke-width="12"/>
-  <circle cx="172" cy="288" r="62" fill="#2563eb"/>
-  <circle cx="172" cy="288" r="24" fill="#dbeafe"/>
-  <rect x="262" y="230" width="152" height="24" rx="12" fill="#93c5fd"/>
-  <rect x="262" y="274" width="116" height="20" rx="10" fill="#60a5fa"/>
-  <rect x="262" y="308" width="88" height="18" rx="9" fill="#3b82f6"/>
-  <path d="M112 156 L254 70" stroke="#93c5fd" stroke-width="14" stroke-linecap="round"/>
-  <circle cx="260" cy="66" r="14" fill="#dbeafe"/>
+  <rect width="512" height="512" rx="80" fill="#0f172a"/>
+  <rect x="68" y="166" width="376" height="226" rx="30" fill="#111827" stroke="#60a5fa" stroke-width="14"/>
+  <circle cx="168" cy="279" r="58" fill="#1d4ed8" stroke="#bfdbfe" stroke-width="10"/>
+  <circle cx="168" cy="279" r="18" fill="#e0f2fe"/>
+  <rect x="250" y="228" width="150" height="26" rx="13" fill="#bfdbfe"/>
+  <rect x="250" y="274" width="124" height="22" rx="11" fill="#93c5fd"/>
+  <rect x="250" y="314" width="94" height="18" rx="9" fill="#60a5fa"/>
+  <path d="M118 166 L244 82" stroke="#bfdbfe" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="250" cy="78" r="14" fill="#e0f2fe"/>
+  <path d="M334 140c22 8 38 25 45 45" stroke="#bfdbfe" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <path d="M358 125c28 10 49 31 58 58" stroke="#93c5fd" stroke-width="8" fill="none" stroke-linecap="round"/>
 </svg>

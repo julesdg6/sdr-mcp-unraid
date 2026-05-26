@@ -8,7 +8,7 @@ This repository packages SDR MCP into an Unraid-friendly container with:
 
 - persistent paths for `/config`, `/recordings`, and `/data`
 - configurable ports and startup mode
-- embedded web dashboard served on port `8766`
+- embedded upstream SDR dashboard (built from `web_sota`) served on port `8766`
 - optional RTL-SDR USB passthrough guidance
 - Unraid 7 Community Apps template
 - multi-arch GitHub Actions build and publish workflow
@@ -129,10 +129,12 @@ Alternative for host networking if needed:
 
 ## SDR hardware support notes
 
-- **Best supported:** RTL2832U-based RTL-SDR devices (for example RTL-SDR Blog v3/v4).
-- This container ships RTL-SDR tooling used by MCP operations (`sdr_list_devices`, `sdr_initialize`, etc.).
-- DVB-only tuners may expose `/dev/dvb` successfully but can be limited for RTL-SDR-specific workflows.
-- If your hardware only supports DVB APIs and not RTL2832U SDR mode, MCP spectrum tools may not initialize.
+- **Tested baseline:** RTL2832U-based RTL-SDR devices (for example RTL-SDR Blog v3/v4).
+- This container includes RTL-SDR tooling used by MCP operations (`sdr_list_devices`, `sdr_initialize`, `sdr_get_spectrum`, etc.).
+- Typical `sdr_list_devices` success output reports at least one RTL device index/serial; zero devices means MCP SDR capture tools cannot initialize.
+- **SoapySDR status:** this image currently targets the upstream RTL-SDR (`pyrtlsdr`) workflow, not a generic SoapySDR backend.
+- DVB-only tuners may expose `/dev/dvb` correctly while still failing RTL2832U-specific SDR initialization.
+- If your hardware only supports DVB APIs and not RTL2832U SDR mode, MCP spectrum/waterfall workflows may not start.
 
 ## Example MCP client configuration
 
@@ -155,6 +157,7 @@ The provided XML template includes:
 
 - WebUI link (`http://[IP]:[PORT:8766]`)
 - CA-compatible PNG icon URL field
+- upstream SDR dashboard UI (spectrum/waterfall/tuning controls) served from built static assets
 - shell access (`bash`)
 - bridge networking by default, with host-networking guidance
 - CA-friendly metadata and categories
