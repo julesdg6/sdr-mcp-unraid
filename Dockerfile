@@ -24,7 +24,8 @@ RUN useradd -m -u 1000 -s /bin/bash appuser \
     && mkdir -p /config /recordings /data \
     && chown -R appuser:appuser /config /recordings /data
 
-RUN pip install --no-cache-dir "git+https://github.com/sandraschi/sdr-mcp.git@master"
+ARG SDR_MCP_REF=8ef69e5c385f46aa640b15089b4a1e9b960385fa
+RUN pip install --no-cache-dir "git+https://github.com/sandraschi/sdr-mcp.git@${SDR_MCP_REF}"
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
