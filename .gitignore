@@ -1,0 +1,17 @@
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local env and tooling
+.env
+.env.*
+.idea/
+.vscode/
+
+# Docker/runtime
+*.log
+tmp/
+*.tmp
