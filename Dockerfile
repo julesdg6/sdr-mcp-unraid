@@ -1,3 +1,20 @@
+ARG SDR_MCP_REF=8ef69e5c385f46aa640b15089b4a1e9b960385fa
+
+FROM node:22-bookworm-slim AS web-build
+
+ARG SDR_MCP_REF
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/sandraschi/sdr-mcp.git /tmp/sdr-mcp \
+    && cd /tmp/sdr-mcp \
+    && git checkout "${SDR_MCP_REF}" \
+    && cd web_sota \
+    && npm install \
+    && npx vite build
+
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="sdr-mcp-unraid" \
@@ -25,7 +42,7 @@ RUN useradd -m -u 1000 -s /bin/bash appuser \
     && mkdir -p /config /recordings /data \
     && chown -R appuser:appuser /config /recordings /data
 
-ARG SDR_MCP_REF=8ef69e5c385f46aa640b15089b4a1e9b960385fa
+ARG SDR_MCP_REF
 RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-mcp.git@${SDR_MCP_REF}" \
     && pip install --no-cache-dir \
         "fastmcp>=3.2.0,<4" \
@@ -40,7 +57,7 @@ RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-
         "prefab-ui>=0.14.0"
 
 COPY docker/entrypoint.sh /entrypoint.sh
-COPY web/dashboard /opt/web_sota
+COPY --from=web-build /tmp/sdr-mcp/web_sota/dist /opt/web_sota
 RUN chmod +x /entrypoint.sh
 
 VOLUME ["/config", "/recordings", "/data"]
