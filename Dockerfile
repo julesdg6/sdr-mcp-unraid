@@ -14,7 +14,7 @@ RUN git clone https://github.com/sandraschi/sdr-mcp.git /tmp/sdr-mcp \
     && cd web_sota \
     && npm install \
     && npx vite build \
-    && find dist -type f -name '*.js' -exec sed -i 's#"ws://localhost:8765"#((window.location.protocol==="https:"?"wss:":"ws:")+"//"+window.location.host+"/")#g' {} + \
+    && find dist -type f -name '*.js' -exec sed -i 's#"ws://localhost:8765"#((window.location.protocol==="https:"?"wss:":"ws:")+"//"+window.location.host+"/ws")#g' {} + \
     && ! grep -R --fixed-strings 'ws://localhost:8765' dist
 
 FROM python:3.12-slim
@@ -30,7 +30,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=10891 \
-    FRONTEND_PORT=8766
+    FRONTEND_PORT=8766 \
+    SDR_WS_PORT=8765
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -38,6 +39,7 @@ RUN apt-get update \
         librtlsdr0 \
         rtl-sdr \
         ca-certificates \
+        nginx \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 -s /bin/bash appuser \
@@ -59,6 +61,7 @@ RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-
         "prefab-ui>=0.14.0"
 
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/ws_start.py /opt/ws_start.py
 COPY --from=web-build /tmp/sdr-mcp/web_sota/dist /opt/web_sota
 RUN chmod +x /entrypoint.sh
 

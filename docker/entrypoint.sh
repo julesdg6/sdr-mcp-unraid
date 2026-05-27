@@ -7,20 +7,93 @@ if [[ "${MCP_TRANSPORT}" == "stdio" ]]; then
   exec sdr-mcp serve
 fi
 
-python -m http.server "${FRONTEND_PORT}" --bind 0.0.0.0 -d /opt/web_sota &
-frontend_pid=$!
+# ---------------------------------------------------------------------------
+# Generate nginx config so it picks up FRONTEND_PORT and SDR_WS_PORT at
+# runtime.  We write to /tmp so the unprivileged appuser can create the file.
+# ---------------------------------------------------------------------------
+NGINX_CONF=/tmp/nginx.conf
+NGINX_PID=/tmp/nginx.pid
 
+cat > "${NGINX_CONF}" <<NGINX_EOF
+worker_processes 1;
+pid ${NGINX_PID};
+error_log /dev/stderr info;
+daemon off;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log /dev/stdout;
+
+    # Temp paths writable by appuser
+    client_body_temp_path /tmp/nginx_body;
+    proxy_temp_path       /tmp/nginx_proxy;
+    fastcgi_temp_path     /tmp/nginx_fastcgi;
+    uwsgi_temp_path       /tmp/nginx_uwsgi;
+    scgi_temp_path        /tmp/nginx_scgi;
+
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    server {
+        listen ${FRONTEND_PORT};
+        root /opt/web_sota;
+
+        # WebSocket endpoint proxied to the SDR spectrum server
+        location /ws {
+            proxy_pass         http://127.0.0.1:${SDR_WS_PORT}/;
+            proxy_http_version 1.1;
+            proxy_set_header   Upgrade    \$http_upgrade;
+            proxy_set_header   Connection \$connection_upgrade;
+            proxy_set_header   Host       \$host;
+            proxy_read_timeout 3600s;
+        }
+
+        # Static SPA – fall back to index.html for client-side routing
+        location / {
+            try_files \$uri \$uri/ /index.html;
+        }
+    }
+}
+NGINX_EOF
+
+# Create tmp dirs nginx wants to use
+mkdir -p /tmp/nginx_body /tmp/nginx_proxy /tmp/nginx_fastcgi \
+         /tmp/nginx_uwsgi /tmp/nginx_scgi
+
+# ---------------------------------------------------------------------------
+# Start services
+# ---------------------------------------------------------------------------
+
+# nginx serves the web dashboard and proxies /ws → localhost:SDR_WS_PORT
+nginx -c "${NGINX_CONF}" &
+nginx_pid=$!
+
+# SDR WebSocket server (retries on failure so the container stays alive when
+# hardware is momentarily unavailable)
+python /opt/ws_start.py &
+ws_pid=$!
+
+# MCP HTTP server
 sdr-mcp serve --http --host "${MCP_HOST}" --port "${MCP_PORT}" &
 mcp_pid=$!
 
 cleanup() {
-  kill "${mcp_pid}" "${frontend_pid}" 2>/dev/null || true
-  wait "${mcp_pid}" "${frontend_pid}" 2>/dev/null || true
+  kill "${mcp_pid}" "${nginx_pid}" "${ws_pid}" 2>/dev/null || true
+  wait "${mcp_pid}" "${nginx_pid}" "${ws_pid}" 2>/dev/null || true
 }
 
 trap cleanup SIGINT SIGTERM
 
-wait -n "${mcp_pid}" "${frontend_pid}"
+# Exit the container if nginx or the MCP server dies; the WS server may
+# temporarily exit when SDR hardware is unavailable and will self-retry.
+wait -n "${nginx_pid}" "${mcp_pid}"
 status=$?
 cleanup
 exit "${status}"

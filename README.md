@@ -24,7 +24,8 @@ sdr-mcp-unraid/
 │   ├── icon-square.png
 │   └── icon-square.svg
 ├── docker/
-│   └── entrypoint.sh
+│   ├── entrypoint.sh
+│   └── ws_start.py
 ├── unraid/
 │   └── sdr-mcp-unraid.xml
 ├── .gitignore
@@ -83,7 +84,25 @@ docker compose up -d
 ## Port mappings
 
 - `10891/tcp` → MCP HTTP endpoint (`/mcp`)
-- `8766/tcp` → Embedded web dashboard
+- `8766/tcp` → Embedded web dashboard + WebSocket proxy
+
+### How networking works
+
+Port 8766 is served by **nginx** inside the container.  nginx has two roles:
+
+1. **Static files** – serves the built Vite SPA from `/opt/web_sota` (spectrum
+   analyzer, waterfall, station browser).
+2. **WebSocket proxy** – any request to `/ws` with an `Upgrade: websocket`
+   header is transparently proxied to the SDR spectrum server running on
+   `localhost:8765` (internal, not exposed).
+
+The browser therefore connects to a single port for both the page and the live
+data stream:
+
+```
+ws://<host>:8766/ws   ←→  nginx  ←→  SDRWebSocketServer :8765
+http://<host>:8766/   ←→  nginx  →   /opt/web_sota (static files)
+```
 
 ## Volume mappings
 
@@ -169,7 +188,8 @@ The provided XML template includes:
 | `MCP_TRANSPORT` | `http` | `http` or `stdio` |
 | `MCP_HOST` | `0.0.0.0` | Bind host for HTTP mode |
 | `MCP_PORT` | `10891` | HTTP listen port |
-| `FRONTEND_PORT` | `8766` | Dashboard listen port |
+| `FRONTEND_PORT` | `8766` | Dashboard / nginx listen port |
+| `SDR_WS_PORT` | `8765` | Internal SDR WebSocket server port (proxied via nginx; not exposed externally) |
 
 ## Troubleshooting
 
@@ -179,6 +199,7 @@ The provided XML template includes:
 | Permission errors reading USB | Container user lacks access | Add supplemental device mapping or use privileged mode only when required |
 | MCP client cannot connect | Wrong URL/port | Check `http://<host>:10891/mcp` and Unraid port mapping |
 | Dashboard not reachable | Port blocked/unmapped | Confirm container exposes and maps `8766/tcp` |
+| WebSocket fails to connect | SDR hardware not detected | Check container logs; the WebSocket server retries every 10 s once hardware is available |
 | Data lost after container update | Non-persistent paths | Ensure `/config`, `/recordings`, `/data` map to host storage |
 
 ## Image metadata / labels
