@@ -11,6 +11,7 @@ it becomes available.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -23,8 +24,28 @@ logging.basicConfig(
 logger = logging.getLogger("ws_start")
 
 
+def _patch_handle_client_compat(server_class: type) -> None:
+    """Adapt legacy (websocket, path) handlers to newer websockets callbacks."""
+    handle_client = server_class.handle_client
+    params = inspect.signature(handle_client).parameters
+    if len(params) != 3:
+        return
+
+    async def handle_client_compat(self, websocket):  # type: ignore[no-untyped-def]
+        path = getattr(websocket, "path", None)
+        if path is None:
+            request = getattr(websocket, "request", None)
+            path = getattr(request, "path", "")
+        return await handle_client(self, websocket, path)
+
+    server_class.handle_client = handle_client_compat
+    logger.info("Applied legacy handle_client(websocket, path) compatibility shim")
+
+
 async def main() -> None:
     from sdr_mcp.websocket_server import SDRWebSocketServer  # noqa: PLC0415
+
+    _patch_handle_client_compat(SDRWebSocketServer)
 
     host = "127.0.0.1"
     port = int(os.environ.get("SDR_WS_PORT", "8765"))
