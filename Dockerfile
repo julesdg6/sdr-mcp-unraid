@@ -51,7 +51,8 @@ RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-
     && pip install --no-cache-dir \
         "fastmcp>=3.2.0,<4" \
         "httpx>=0.27.0,<1.0.0" \
-        "pyrtlsdr>=0.3.0,<1.0.0" \
+        "setuptools==75.8.0" \
+        "pyrtlsdr==0.3.0" \
         "numpy>=1.21.0,<2.0.0" \
         "scipy>=1.7.0,<2.0.0" \
         "websockets>=15.0.1" \
