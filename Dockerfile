@@ -13,7 +13,9 @@ RUN git clone https://github.com/sandraschi/sdr-mcp.git /tmp/sdr-mcp \
     && git checkout "${SDR_MCP_REF}" \
     && cd web_sota \
     && npm install \
-    && npx vite build
+    && npx vite build \
+    && find dist -type f -name '*.js' -exec sed -i 's#"ws://localhost:8765"#((window.location.protocol==="https:"?"wss:":"ws:")+"//"+window.location.host+"/")#g' {} + \
+    && ! grep -R --fixed-strings 'ws://localhost:8765' dist
 
 FROM python:3.12-slim
 
