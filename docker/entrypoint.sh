@@ -45,6 +45,13 @@ http {
         listen ${FRONTEND_PORT};
         root /opt/web_sota;
 
+        # /version endpoint returns the build metadata JSON
+        location = /version {
+            default_type application/json;
+            add_header Cache-Control "no-cache";
+            try_files /version.json =404;
+        }
+
         # WebSocket endpoint proxied to the SDR spectrum server
         location /ws {
             proxy_pass         http://127.0.0.1:${SDR_WS_PORT}/;

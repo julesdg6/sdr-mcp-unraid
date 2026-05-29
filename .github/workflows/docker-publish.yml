@@ -61,3 +61,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp || '' }}
+            IMAGE_TAG=${{ steps.meta.outputs.version }}
+            APP_VERSION=${{ steps.meta.outputs.version }}
