@@ -24,6 +24,11 @@ LABEL org.opencontainers.image.title="sdr-mcp-unraid" \
       org.opencontainers.image.source="https://github.com/julesdg6/sdr-mcp-unraid" \
       org.opencontainers.image.licenses="MIT"
 
+ARG APP_VERSION="0.1.0"
+ARG GIT_COMMIT="unknown"
+ARG BUILD_TIME="unknown"
+ARG IMAGE_TAG="latest"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -31,7 +36,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=10891 \
     FRONTEND_PORT=8766 \
-    SDR_WS_PORT=8765
+    SDR_WS_PORT=8765 \
+    APP_VERSION=${APP_VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    BUILD_TIME=${BUILD_TIME} \
+    IMAGE_TAG=${IMAGE_TAG}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -66,6 +75,12 @@ COPY docker/ws_start.py /opt/ws_start.py
 COPY docker/app_runner.py /opt/app_runner.py
 COPY --from=web-build /tmp/sdr-mcp/web_sota/dist /opt/web_sota
 COPY web/index.html /opt/web_sota/index.html
+
+# Write build-time version metadata so the web dashboard and /version can read it
+RUN printf '{"version":"%s","git_commit":"%s","build_time":"%s","image_tag":"%s"}\n' \
+        "${APP_VERSION}" "${GIT_COMMIT}" "${BUILD_TIME}" "${IMAGE_TAG}" \
+        > /opt/web_sota/version.json
+
 RUN chmod +x /entrypoint.sh
 
 VOLUME ["/config", "/recordings", "/data"]

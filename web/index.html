@@ -21,11 +21,13 @@
     .list { margin-top:8px; display:flex; flex-direction:column; gap:6px; max-height:170px; overflow:auto; }
     .item { display:flex; gap:8px; align-items:center; justify-content:space-between; border:1px solid #334155; border-radius:6px; padding:6px 8px; }
     .item button { padding:3px 7px; }
+    .version-bar { font-size:11px; color:#64748b; text-align:right; padding:4px 0 0; }
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h2>SDR MCP</h2>
+  <h2 style="margin-bottom:2px;">SDR MCP</h2>
+  <div id="versionBar" class="version-bar">Version: loading…</div>
   <div class="row" style="margin-bottom:10px;">
     <button id="connectBtn">Connect</button>
     <span id="conn" class="status">disconnected</span>
@@ -53,6 +55,7 @@
       </label>
       <button id="audioBtn">Play</button>
       <label>Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+      <label><input id="lowCpuToggle" type="checkbox"> Low CPU mode</label>
     </div>
     <div id="status" class="muted" style="margin-top:6px;">No signal/data</div>
     <div id="perf" class="muted" style="margin-top:4px;">Performance stats unavailable</div>
@@ -60,12 +63,18 @@
 
   <div class="grid" style="margin-bottom:12px;">
     <div class="panel"><canvas id="spec" width="900" height="260"></canvas></div>
-    <div class="panel"><canvas id="water" width="900" height="260"></canvas></div>
+    <div class="panel" id="waterfallPanel"><canvas id="water" width="900" height="260"></canvas></div>
   </div>
 
   <div class="grid">
     <div class="panel">
       <h3 style="margin:4px 0 8px;">Scan</h3>
+      <div class="row" style="margin-bottom:8px;">
+        <button id="scanBackBtn">◀ Scan</button>
+        <button id="scanFwdBtn">▶ Scan</button>
+        <button id="scanBtn">Range Scan</button>
+        <button id="scanRefresh">Refresh</button>
+      </div>
       <div class="row">
         <label>Start Hz <input id="scanStart" value="88000000"></label>
         <label>End Hz <input id="scanEnd" value="108000000"></label>
@@ -76,8 +85,6 @@
         </label>
         <label>Signal threshold dB <input id="scanThreshold" value="-45"></label>
         <label>Squelch score <input id="scanSquelch" value="0"></label>
-        <button id="scanBtn">Scan</button>
-        <button id="scanRefresh">Refresh</button>
       </div>
       <div id="scanStatus" class="muted" style="margin-top:6px;">No scan yet</div>
       <div id="scanResults" class="list"></div>
@@ -99,6 +106,8 @@
 <script>
 let ws, connected=false, audioCtx, audioEnabled=false, nextAudioTime=0;
 let audioQueue=[], audioBufferedSeconds=0, audioUnderruns=0, lastAudioStatusPush=0;
+let audioPreBuffering=true;
+const PREBUFFER_S = 0.3;
 const spec=document.getElementById('spec'), water=document.getElementById('water');
 const sctx=spec.getContext('2d'), wctx=water.getContext('2d');
 const conn=document.getElementById('conn'), err=document.getElementById('err');
@@ -112,6 +121,20 @@ const presetStatus=document.getElementById('presetStatus');
 const presetList=document.getElementById('presetList');
 let latestSpectrum=null;
 
+// Load version info from /version endpoint
+fetch('/version').then(r=>r.ok?r.json():null).then(v=>{
+  if(v){
+    const parts=[];
+    if(v.version) parts.push(`v${v.version}`);
+    if(v.git_commit && v.git_commit!=='unknown') parts.push(`commit ${v.git_commit.slice(0,7)}`);
+    if(v.build_time && v.build_time!=='unknown') parts.push(`built ${v.build_time.replace('T',' ').replace('Z','')}`);
+    if(v.image_tag && v.image_tag!=='unknown') parts.push(`image ${v.image_tag}`);
+    document.getElementById('versionBar').textContent='Version: '+(parts.join(' / ')||'n/a');
+  } else {
+    document.getElementById('versionBar').textContent='Version: unavailable';
+  }
+}).catch(()=>{ document.getElementById('versionBar').textContent='Version: unavailable'; });
+
 function setConn(v){ conn.textContent=v; conn.style.background=v==='connected'?'#065f46':'#1e293b'; }
 function send(command, params={}){ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'command', command, params})); }
 
@@ -123,10 +146,10 @@ function cmap(v, m){
 }
 
 function updateStats(st={}){
-  statusEl.textContent=`Center ${Math.round(st.frequency_hz||0)} Hz | Rate ${Math.round(st.sample_rate||0)} | Gain ${st.gain??'n/a'} | Demod ${st.demod_mode||'n/a'}`;
+  statusEl.textContent=`Center ${Math.round(st.frequency_hz||0)} Hz | Rate ${Math.round(st.sample_rate||0)} | Gain ${st.gain??'n/a'} | Demod ${st.demod_mode||'n/a'}${st.low_cpu_mode?' | LOW CPU':''}`;
   const q=st.queue_depth||{};
-  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0} | Queue depth capture/audio/fft/ws ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.ws||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms`;
-  if((st.audio_underruns||0) > 0) audioWarn.textContent=`Audio underruns detected: ${st.audio_underruns}`;
+  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Visual FPS ${Number(st.visual_fps||0).toFixed(0)} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0} | Queue capture/audio/fft/ws ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.ws||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms`;
+  if((st.audio_underruns||0) > 0) audioWarn.textContent=`Audio underruns: ${st.audio_underruns}`;
 }
 
 function drawSpectrum(data){
@@ -183,15 +206,23 @@ function pushAudioChunk(pcmB64, rate){
 
 function scheduleAudio(){
   if(!audioEnabled || !audioCtx) return;
+
+  // Pre-buffering phase: wait until we have enough audio queued before starting playback
+  if(audioPreBuffering){
+    if(audioBufferedSeconds < PREBUFFER_S) return;
+    audioPreBuffering = false;
+    nextAudioTime = audioCtx.currentTime + 0.05;
+  }
+
   if(nextAudioTime < audioCtx.currentTime){
     if(audioBufferedSeconds > 0.05){
       audioUnderruns += 1;
-      audioWarn.textContent = `Audio underruns detected: ${audioUnderruns}`;
+      audioWarn.textContent = `Audio underruns: ${audioUnderruns}`;
     }
     nextAudioTime = audioCtx.currentTime + 0.06;
   }
 
-  while(audioQueue.length && (nextAudioTime - audioCtx.currentTime) < 0.45){
+  while(audioQueue.length && (nextAudioTime - audioCtx.currentTime) < 0.5){
     const chunk=audioQueue.shift();
     const buf=audioCtx.createBuffer(1,chunk.f32.length,chunk.rate);
     buf.copyToChannel(chunk.f32,0);
@@ -221,6 +252,7 @@ function renderScanResults(results=[]){
   for(const r of results){
     const row=document.createElement('div'); row.className='item';
     row.innerHTML=`<span>${Math.round(r.frequency_hz)} Hz | peak ${r.peak_db} dB | score ${r.score}</span>`;
+    const controls=document.createElement('span');
     const tuneBtn=document.createElement('button'); tuneBtn.textContent='Tune';
     tuneBtn.onclick=()=>{
       document.getElementById('freq').value=String(r.frequency_hz);
@@ -228,7 +260,17 @@ function renderScanResults(results=[]){
       send('set_frequency',{frequency:r.frequency_hz});
       send('set_demod_mode',{mode:r.mode});
     };
-    row.appendChild(tuneBtn);
+    const saveBtn=document.createElement('button'); saveBtn.textContent='Save';
+    saveBtn.onclick=()=>{
+      const name=prompt('Preset name for '+Math.round(r.frequency_hz)+' Hz:');
+      if(name && name.trim()) send('save_preset',{
+        name:name.trim(), frequency_hz:r.frequency_hz,
+        mode:r.mode, sample_rate:parseFloat(document.getElementById('rate').value||'2048000'),
+        gain:document.getElementById('gain').value, notes:''
+      });
+    };
+    controls.append(tuneBtn, saveBtn);
+    row.appendChild(controls);
     scanResultsEl.appendChild(row);
   }
 }
@@ -269,7 +311,7 @@ function connect(){
     else if(d.type==='response'){
       if(!d.success) err.textContent=d.message||'Command failed';
       if(d.command==='get_scan_results' && d.results) renderScanResults(d.results);
-      if(d.command==='scan') scanStatus.textContent=d.message||'Scan started';
+      if(d.command==='scan' || d.command==='scan_forward' || d.command==='scan_backward') scanStatus.textContent=d.message||'Scan started';
       if(['save_preset','delete_preset','tune_preset','list_presets'].includes(d.command)){
         if(d.presets) renderPresets(d.presets);
         if(d.preset && d.command!=='delete_preset') presetStatus.textContent=`Preset: ${d.preset.name}`;
@@ -300,9 +342,15 @@ for(const b of document.querySelectorAll('button[data-preset]')) b.onclick=()=>{
 document.getElementById('audioBtn').onclick=(e)=>{
   audioEnabled=!audioEnabled;
   e.target.textContent=audioEnabled?'Stop':'Play';
-  if(audioEnabled){ ensureAudio(); }
+  if(audioEnabled){ ensureAudio(); audioPreBuffering=true; audioBufferedSeconds=0; }
   else { audioQueue=[]; audioBufferedSeconds=0; }
   send(audioEnabled?'start_audio':'stop_audio');
+};
+
+document.getElementById('lowCpuToggle').onchange=(e)=>{
+  send('set_low_cpu_mode',{enabled:e.target.checked});
+  const wp=document.getElementById('waterfallPanel');
+  wp.style.display=e.target.checked?'none':'';
 };
 
 document.getElementById('scanBtn').onclick=()=>{
@@ -315,6 +363,22 @@ document.getElementById('scanBtn').onclick=()=>{
     signal_threshold_db:parseFloat(document.getElementById('scanThreshold').value||'-45'),
     squelch:parseFloat(document.getElementById('scanSquelch').value||'0')
   });
+};
+document.getElementById('scanFwdBtn').onclick=()=>{
+  send('scan_forward',{
+    step_hz:parseFloat(document.getElementById('scanStep').value||'200000'),
+    dwell_ms:parseInt(document.getElementById('scanDwell').value||'120',10),
+    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45')
+  });
+  scanStatus.textContent='Forward scan started…';
+};
+document.getElementById('scanBackBtn').onclick=()=>{
+  send('scan_backward',{
+    step_hz:parseFloat(document.getElementById('scanStep').value||'200000'),
+    dwell_ms:parseInt(document.getElementById('scanDwell').value||'120',10),
+    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45')
+  });
+  scanStatus.textContent='Backward scan started…';
 };
 document.getElementById('scanRefresh').onclick=()=>send('get_scan_results');
 

@@ -29,6 +29,7 @@ logger = logging.getLogger("app_runner")
 
 VALID_DEMODES = {"AM", "WFM", "NFM"}
 DEFAULT_VISUAL_FPS = 12.0
+LOW_CPU_VISUAL_FPS = 5.0
 
 
 class SDRRuntime:
@@ -72,6 +73,7 @@ class SDRRuntime:
         self.browser_audio_underruns = 0
 
         self.visual_fps = float(os.getenv("SDR_VISUAL_FPS", str(DEFAULT_VISUAL_FPS)))
+        self.low_cpu_mode = False
         self.running = False
         self._tasks: list[asyncio.Task] = []
         self._load_presets()
@@ -273,11 +275,11 @@ class SDRRuntime:
                 logger.error("fft loop error: %s", exc)
 
     async def _spectrum_loop(self) -> None:
-        interval = 1.0 / max(1.0, self.visual_fps)
         last_sent = 0.0
         while self.running:
             try:
                 payload = await self.spectrum_queue.get()
+                interval = 1.0 / max(1.0, self.visual_fps)
                 now = time.time()
                 if now - last_sent < interval:
                     continue
@@ -291,11 +293,13 @@ class SDRRuntime:
                 logger.error("spectrum loop error: %s", exc)
 
     async def _waterfall_loop(self) -> None:
-        interval = 1.0 / max(1.0, self.visual_fps)
         last_sent = 0.0
         while self.running:
             try:
                 payload = await self.waterfall_queue.get()
+                if self.low_cpu_mode:
+                    continue
+                interval = 1.0 / max(1.0, self.visual_fps)
                 now = time.time()
                 if now - last_sent < interval:
                     continue
@@ -406,6 +410,8 @@ class SDRRuntime:
             "fft_fps": round(self.fft_fps, 2),
             "audio_buffer_fill_ms": round(self.browser_audio_buffer_ms, 1),
             "audio_underruns": self.browser_audio_underruns,
+            "low_cpu_mode": self.low_cpu_mode,
+            "visual_fps": round(self.visual_fps, 1),
             "queue_depth": {
                 "capture": self.capture_queue.qsize(),
                 "audio": self.audio_out_queue.qsize(),
@@ -558,8 +564,111 @@ class SDRRuntime:
         self.browser_audio_buffer_ms = max(0.0, float(fill_ms))
         self.browser_audio_underruns = max(0, int(underruns))
 
+    def set_low_cpu_mode(self, enabled: bool) -> None:
+        self.low_cpu_mode = bool(enabled)
+        self.visual_fps = LOW_CPU_VISUAL_FPS if self.low_cpu_mode else float(os.getenv("SDR_VISUAL_FPS", str(DEFAULT_VISUAL_FPS)))
+        logger.info("low_cpu_mode=%s visual_fps=%.1f", self.low_cpu_mode, self.visual_fps)
+
+    async def scan_directional(
+        self,
+        direction: int,
+        step_hz: float,
+        dwell_ms: int,
+        signal_threshold_db: float | None = None,
+        scan_range_hz: float = 20_000_000.0,
+    ) -> dict[str, Any]:
+        """Scan forward (direction=1) or backward (direction=-1) from current frequency."""
+        if not await self.initialize():
+            return {"success": False, "message": self.init_error or "SDR initialization failed", "status": self.get_status()}
+        if step_hz <= 0:
+            return {"success": False, "message": "step_hz must be > 0", "status": self.get_status()}
+        if dwell_ms < 20:
+            return {"success": False, "message": "dwell_ms must be >= 20", "status": self.get_status()}
+
+        if signal_threshold_db is not None:
+            self.scan_threshold_db = float(signal_threshold_db)
+
+        start_hz = float(self.capture.center_freq)
+        step = abs(step_hz) * direction
+        end_hz = start_hz + scan_range_hz * direction
+
+        if self._scan_task and not self._scan_task.done():
+            self._scan_task.cancel()
+
+        self._scan_task = asyncio.create_task(
+            self._run_scan_directional(start_hz, end_hz, step, dwell_ms, self.demod_mode),
+            name="scan_directional_task",
+        )
+        return {
+            "success": True,
+            "message": f"Directional scan {'forward' if direction > 0 else 'backward'} started from {start_hz:.0f} Hz",
+            "status": self.get_status(),
+        }
+
+    async def _run_scan_directional(
+        self,
+        start_hz: float,
+        end_hz: float,
+        step: float,
+        dwell_ms: int,
+        mode: str,
+    ) -> None:
+        async with self._scan_lock:
+            self.scan_running = True
+            self.scan_results = []
+            direction = 1 if step > 0 else -1
+            try:
+                freq = start_hz + step
+                while (freq <= end_hz if direction > 0 else freq >= end_hz):
+                    await self.set_frequency(freq)
+                    await asyncio.sleep(dwell_ms / 1000.0)
+
+                    while not self._scan_samples.empty():
+                        try:
+                            self._scan_samples.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+
+                    try:
+                        samples = await asyncio.wait_for(self._scan_samples.get(), timeout=1.0)
+                    except TimeoutError:
+                        freq += step
+                        continue
+
+                    spectrum = self.processor.process_samples(samples)
+                    values = np.asarray(spectrum.get("spectrum", []), dtype=float)
+                    if values.size == 0 or not np.all(np.isfinite(values)):
+                        freq += step
+                        continue
+
+                    peak_db = float(np.max(values))
+                    score = peak_db - float(np.median(values))
+                    if peak_db >= self.scan_threshold_db and score >= self.scan_squelch:
+                        self.scan_results.append(
+                            {
+                                "frequency_hz": round(freq, 2),
+                                "peak_db": round(peak_db, 2),
+                                "score": round(score, 2),
+                                "mode": mode,
+                            }
+                        )
+                        await self.set_frequency(freq)
+                        return
+                    freq += step
+            finally:
+                self.scan_running = False
+
 
 runtime = SDRRuntime()
+
+
+@mcp.tool()
+async def sdr_set_frequency(frequency_hz: float) -> dict[str, Any]:
+    """Tune the SDR to a given frequency in Hz."""
+    if not await runtime.initialize():
+        return {"success": False, "message": runtime.init_error or "SDR initialization failed", **runtime.get_status()}
+    ok = await runtime.set_frequency(frequency_hz)
+    return {"success": ok, **runtime.get_status(), "message": "Frequency updated" if ok else "Failed to set frequency"}
 
 
 @mcp.tool()
@@ -599,6 +708,18 @@ async def sdr_scan(start_hz: float, end_hz: float, step_hz: float, dwell_ms: int
 async def sdr_get_scan_results() -> dict[str, Any]:
     """Return latest SDR scan results."""
     return await runtime.get_scan_results()
+
+
+@mcp.tool()
+async def sdr_scan_forward(step_hz: float, dwell_ms: int, threshold: float = -45.0) -> dict[str, Any]:
+    """Scan forward (increasing frequency) from current frequency, stopping at first signal above threshold."""
+    return await runtime.scan_directional(1, step_hz, dwell_ms, threshold)
+
+
+@mcp.tool()
+async def sdr_scan_backward(step_hz: float, dwell_ms: int, threshold: float = -45.0) -> dict[str, Any]:
+    """Scan backward (decreasing frequency) from current frequency, stopping at first signal above threshold."""
+    return await runtime.scan_directional(-1, step_hz, dwell_ms, threshold)
 
 
 @mcp.tool()
@@ -716,6 +837,23 @@ class SDRWebSocketServer:
                 int(params.get("underruns", runtime.browser_audio_underruns)),
             )
             result = {"success": True, "message": "Audio buffer status updated"}
+        elif cmd == "scan_forward":
+            result = await runtime.scan_directional(
+                1,
+                float(params.get("step_hz", 200_000)),
+                int(params.get("dwell_ms", 120)),
+                float(params.get("threshold", runtime.scan_threshold_db)),
+            )
+        elif cmd == "scan_backward":
+            result = await runtime.scan_directional(
+                -1,
+                float(params.get("step_hz", 200_000)),
+                int(params.get("dwell_ms", 120)),
+                float(params.get("threshold", runtime.scan_threshold_db)),
+            )
+        elif cmd == "set_low_cpu_mode":
+            runtime.set_low_cpu_mode(bool(params.get("enabled", False)))
+            result = {"success": True, "message": f"Low CPU mode {'enabled' if runtime.low_cpu_mode else 'disabled'}"}
 
         result.setdefault("status", runtime.get_status())
         await self._send(
