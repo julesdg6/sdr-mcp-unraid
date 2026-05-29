@@ -75,25 +75,19 @@ mkdir -p /tmp/nginx_body /tmp/nginx_proxy /tmp/nginx_fastcgi \
 nginx -c "${NGINX_CONF}" &
 nginx_pid=$!
 
-# SDR WebSocket server (retries on failure so the container stays alive when
-# hardware is momentarily unavailable)
-python /opt/ws_start.py &
-ws_pid=$!
-
-# MCP HTTP server
-sdr-mcp serve --http --host "${MCP_HOST}" --port "${MCP_PORT}" &
-mcp_pid=$!
+# Combined MCP + SDR WebSocket runtime
+python /opt/app_runner.py &
+app_pid=$!
 
 cleanup() {
-  kill "${mcp_pid}" "${nginx_pid}" "${ws_pid}" 2>/dev/null || true
-  wait "${mcp_pid}" "${nginx_pid}" "${ws_pid}" 2>/dev/null || true
+  kill "${app_pid}" "${nginx_pid}" 2>/dev/null || true
+  wait "${app_pid}" "${nginx_pid}" 2>/dev/null || true
 }
 
 trap cleanup SIGINT SIGTERM
 
-# Exit the container if nginx or the MCP server dies; the WS server may
-# temporarily exit when SDR hardware is unavailable and will self-retry.
-wait -n "${nginx_pid}" "${mcp_pid}"
+# Exit the container if nginx or the app server dies.
+wait -n "${nginx_pid}" "${app_pid}"
 status=$?
 cleanup
 exit "${status}"

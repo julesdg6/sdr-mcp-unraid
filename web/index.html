@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SDR MCP Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; }
+    .wrap { max-width:1200px; margin:0 auto; padding:16px; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .status { padding:6px 10px; border-radius:6px; background:#1e293b; }
+    button,select,input { background:#111827; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:6px 8px; }
+    canvas { width:100%; border:1px solid #334155; border-radius:8px; background:#020617; display:block; }
+    .grid { display:grid; gap:12px; grid-template-columns:1fr; }
+    @media (min-width: 960px) { .grid { grid-template-columns:1fr 1fr; } }
+    .muted { color:#94a3b8; font-size:12px; }
+    .error { color:#fca5a5; }
+    .panel { background:#0b1220; border:1px solid #1e293b; border-radius:10px; padding:10px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>SDR MCP</h2>
+  <div class="row" style="margin-bottom:10px;">
+    <button id="connectBtn">Connect</button>
+    <span id="conn" class="status">disconnected</span>
+    <span id="err" class="error"></span>
+  </div>
+
+  <div class="panel" style="margin-bottom:12px;">
+    <div class="row">
+      <label>Frequency (Hz) <input id="freq" value="198000" /></label>
+      <button id="setFreq">Set</button>
+      <button data-preset="198000" data-mode="AM">BBC Radio 4 LW 198 kHz</button>
+      <button data-preset="162000" data-mode="AM">France Inter 162 kHz</button>
+      <label>Gain
+        <select id="gain"><option>auto</option><option>0</option><option>10</option><option>20</option><option>30</option><option>40</option><option>49.6</option></select>
+      </label>
+      <label>Sample rate
+        <select id="rate"><option value="1024000">1.024M</option><option value="2048000" selected>2.048M</option><option value="2400000">2.4M</option></select>
+      </label>
+      <label>Demod
+        <select id="demod"><option>AM</option><option selected>WFM</option><option>NFM</option></select>
+      </label>
+      <label>Colour map
+        <select id="cmap"><option value="turbo">Turbo</option><option value="gray">Gray</option><option value="fire">Fire</option></select>
+      </label>
+      <button id="audioBtn">Play</button>
+      <label>Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+    </div>
+    <div id="status" class="muted" style="margin-top:6px;">No signal/data</div>
+  </div>
+
+  <div class="grid">
+    <div class="panel"><canvas id="spec" width="900" height="260"></canvas></div>
+    <div class="panel"><canvas id="water" width="900" height="260"></canvas></div>
+  </div>
+</div>
+<script>
+let ws, connected=false, audioCtx, audioEnabled=false, nextAudioTime=0;
+const spec=document.getElementById('spec'), water=document.getElementById('water');
+const sctx=spec.getContext('2d'), wctx=water.getContext('2d');
+const conn=document.getElementById('conn'), err=document.getElementById('err');
+const statusEl=document.getElementById('status');
+const vol=document.getElementById('vol');
+
+function setConn(v){ conn.textContent=v; conn.style.background=v==='connected'?'#065f46':'#1e293b'; }
+function send(command, params={}){ if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'command', command, params})); }
+function cmap(v, m){
+  if (!Number.isFinite(v)) return [120,120,120];
+  if (m==='gray') { const c=Math.floor(v*255); return [c,c,c]; }
+  if (m==='fire') return [Math.floor(255*v), Math.floor(180*Math.max(0,v-0.2)), Math.floor(60*Math.max(0,v-0.5))];
+  return [Math.floor(255*v), Math.floor(255*(1-v)), Math.floor(200*(1-Math.abs(0.5-v)*2))];
+}
+
+function drawSpectrum(data){
+  const sp=(data.spectrum||[]).filter(Number.isFinite);
+  if(!sp.length){ sctx.clearRect(0,0,spec.width,spec.height); sctx.fillStyle='#94a3b8'; sctx.fillText('No signal/data',20,20); return; }
+  const min=data.db_min ?? Math.min(...sp), max=data.db_max ?? Math.max(...sp);
+  sctx.clearRect(0,0,spec.width,spec.height);
+  sctx.strokeStyle='#22d3ee'; sctx.beginPath();
+  sp.forEach((v,i)=>{ const x=(i/(sp.length-1))*spec.width; const y=spec.height-(Math.max(0,Math.min(1,(v-min)/(max-min||1)))*spec.height); i?sctx.lineTo(x,y):sctx.moveTo(x,y); });
+  sctx.stroke();
+  if(data.peak&&Number.isFinite(data.peak.index)){
+    const x=(data.peak.index/(sp.length-1))*spec.width;
+    sctx.strokeStyle='#f59e0b'; sctx.beginPath(); sctx.moveTo(x,0); sctx.lineTo(x,spec.height); sctx.stroke();
+  }
+  const st=data.status||{};
+  statusEl.textContent=`Center ${Math.round(st.frequency_hz||0)} Hz | Rate ${Math.round(st.sample_rate||0)} | Gain ${st.gain??'n/a'} | Demod ${st.demod_mode||'n/a'} | IQ/s ${Math.round(st.samples_per_sec||0)}`;
+}
+
+function drawWaterfall(data){
+  const sp=data.spectrum||[];
+  if(!sp.length || !sp.some(Number.isFinite)){
+    wctx.fillStyle='rgba(2,6,23,0.3)'; wctx.fillRect(0,0,water.width,water.height);
+    wctx.fillStyle='#94a3b8'; wctx.fillText('No signal/data',20,20);
+    return;
+  }
+  const min=data.db_min ?? -90, max=data.db_max ?? -20;
+  const line=wctx.createImageData(water.width,1);
+  const step=sp.length/water.width;
+  for(let x=0;x<water.width;x++){
+    const i=Math.min(sp.length-1,Math.floor(x*step));
+    const v=Math.max(0,Math.min(1,((sp[i]??min)-min)/((max-min)||1)));
+    const [r,g,b]=cmap(v, document.getElementById('cmap').value);
+    const p=x*4; line.data[p]=r; line.data[p+1]=g; line.data[p+2]=b; line.data[p+3]=255;
+  }
+  wctx.drawImage(water,0,-1); wctx.putImageData(line,0,water.height-1);
+  wctx.fillStyle='rgba(15,23,42,0.7)'; wctx.fillRect(0,0,water.width,16);
+  wctx.fillStyle='#cbd5e1'; wctx.font='11px monospace';
+  const f=data.frequencies||[];
+  if(f.length){
+    wctx.fillText(`${Math.round(f[0])}Hz`,4,12);
+    wctx.fillText(`${Math.round(f[Math.floor(f.length/2)])}Hz`,water.width/2-30,12);
+    wctx.fillText(`${Math.round(f[f.length-1])}Hz`,water.width-90,12);
+  }
+}
+
+function playPcm(pcmB64, rate){
+  if(!audioEnabled) return;
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const bytes=Uint8Array.from(atob(pcmB64), c=>c.charCodeAt(0));
+  const pcm=new Int16Array(bytes.buffer);
+  const f32=new Float32Array(pcm.length);
+  const volume=parseFloat(vol.value||'0.7');
+  for(let i=0;i<pcm.length;i++) f32[i]=(pcm[i]/32768)*volume;
+  const buf=audioCtx.createBuffer(1,f32.length,rate);
+  buf.copyToChannel(f32,0);
+  const src=audioCtx.createBufferSource(); src.buffer=buf; src.connect(audioCtx.destination);
+  const t=Math.max(audioCtx.currentTime+0.02,nextAudioTime); src.start(t); nextAudioTime=t+buf.duration;
+}
+
+function connect(){
+  err.textContent='';
+  ws = new WebSocket(((location.protocol==='https:')?'wss://':'ws://')+location.host+'/ws');
+  setConn('connecting');
+  ws.onopen=()=>{ connected=true; setConn('connected'); };
+  ws.onclose=()=>{ connected=false; setConn('disconnected'); };
+  ws.onerror=()=>{ setConn('error'); err.textContent='WebSocket error: unable to connect or stream data'; };
+  ws.onmessage=(e)=>{
+    let d; try{ d=JSON.parse(e.data); }catch{return;}
+    if(d.type==='error'){ err.textContent=d.message||'Unknown stream error'; }
+    else if(d.type==='response' && !d.success){ err.textContent=d.message||'Command failed'; }
+    else if(d.type==='spectrum'){ drawSpectrum(d); drawWaterfall(d); }
+    else if(d.type==='no_data'){ statusEl.textContent='No signal/data'; }
+    else if(d.type==='audio'){ playPcm(d.pcm_b64, d.sample_rate||48000); }
+  };
+}
+
+document.getElementById('connectBtn').onclick=()=>{ if(!connected) connect(); else ws.close(); };
+document.getElementById('setFreq').onclick=()=>send('set_frequency',{frequency:parseFloat(document.getElementById('freq').value||'0')});
+document.getElementById('gain').onchange=(e)=>send('set_gain',{gain:e.target.value});
+document.getElementById('rate').onchange=(e)=>send('set_sample_rate',{sample_rate:parseFloat(e.target.value)});
+document.getElementById('demod').onchange=(e)=>send('set_demod_mode',{mode:e.target.value});
+for(const b of document.querySelectorAll('button[data-preset]')) b.onclick=()=>{
+  const f=parseFloat(b.dataset.preset); const m=b.dataset.mode;
+  document.getElementById('freq').value=String(f);
+  document.getElementById('demod').value=m;
+  send('set_frequency',{frequency:f}); send('set_demod_mode',{mode:m});
+};
+document.getElementById('audioBtn').onclick=(e)=>{
+  audioEnabled=!audioEnabled; e.target.textContent=audioEnabled?'Stop':'Play';
+  send(audioEnabled?'start_audio':'stop_audio');
+};
+</script>
+</body>
+</html>
