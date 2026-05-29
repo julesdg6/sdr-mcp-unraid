@@ -9,6 +9,8 @@ This repository packages SDR MCP into an Unraid-friendly container with:
 - persistent paths for `/config`, `/recordings`, and `/data`
 - configurable ports and startup mode
 - embedded upstream SDR dashboard (built from `web_sota`) served on port `8766`
+- decoupled SDR streaming pipeline with separate audio/visual websocket messages and runtime stats
+- dashboard scan workflow and persistent station presets
 - optional RTL-SDR USB passthrough guidance
 - Unraid 7 Community Apps template
 - multi-arch GitHub Actions build and publish workflow
@@ -190,6 +192,8 @@ The provided XML template includes:
 | `MCP_PORT` | `10891` | HTTP listen port |
 | `FRONTEND_PORT` | `8766` | Dashboard / nginx listen port |
 | `SDR_WS_PORT` | `8765` | Internal SDR WebSocket server port (proxied via nginx; not exposed externally) |
+| `SDR_PRESETS_FILE` | `/config/presets.json` | Persistent JSON file for saved scan presets |
+| `SDR_VISUAL_FPS` | `12` | Throttle target for spectrum/waterfall update rate |
 
 ## Troubleshooting
 
