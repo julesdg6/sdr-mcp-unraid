@@ -63,7 +63,9 @@ RUN pip install --no-cache-dir --no-deps "git+https://github.com/sandraschi/sdr-
 
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/ws_start.py /opt/ws_start.py
+COPY docker/app_runner.py /opt/app_runner.py
 COPY --from=web-build /tmp/sdr-mcp/web_sota/dist /opt/web_sota
+COPY web/index.html /opt/web_sota/index.html
 RUN chmod +x /entrypoint.sh
 
 VOLUME ["/config", "/recordings", "/data"]
