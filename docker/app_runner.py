@@ -74,6 +74,8 @@ class SDRRuntime:
 
         self.visual_fps = float(os.getenv("SDR_VISUAL_FPS", str(DEFAULT_VISUAL_FPS)))
         self.low_cpu_mode = False
+        self.scanning_sample_rate = float(os.getenv("SDR_SCAN_SAMPLE_RATE", "2048000"))
+        self.listening_sample_rate = float(os.getenv("SDR_LISTEN_SAMPLE_RATE", "1024000"))
         self.running = False
         self._tasks: list[asyncio.Task] = []
         self._load_presets()
@@ -462,6 +464,7 @@ class SDRRuntime:
         async with self._scan_lock:
             self.scan_running = True
             self.scan_results = []
+            await self.set_sample_rate(self.scanning_sample_rate)
             try:
                 await self.set_demod_mode(mode)
 
@@ -505,6 +508,7 @@ class SDRRuntime:
                     freq += step
             finally:
                 self.scan_running = False
+                await self.set_sample_rate(self.listening_sample_rate)
 
     async def get_scan_results(self) -> dict[str, Any]:
         return {"success": True, "running": self.scan_running, "results": list(self.scan_results), "status": self.get_status()}
@@ -575,6 +579,7 @@ class SDRRuntime:
         step_hz: float,
         dwell_ms: int,
         signal_threshold_db: float | None = None,
+        squelch: float | None = None,
         scan_range_hz: float = 20_000_000.0,
     ) -> dict[str, Any]:
         """Scan forward (direction=1) or backward (direction=-1) from current frequency."""
@@ -587,6 +592,8 @@ class SDRRuntime:
 
         if signal_threshold_db is not None:
             self.scan_threshold_db = float(signal_threshold_db)
+        if squelch is not None:
+            self.scan_squelch = float(squelch)
 
         start_hz = float(self.capture.center_freq)
         step = abs(step_hz) * direction
@@ -617,6 +624,7 @@ class SDRRuntime:
             self.scan_running = True
             self.scan_results = []
             direction = 1 if step > 0 else -1
+            await self.set_sample_rate(self.scanning_sample_rate)
             try:
                 freq = start_hz + step
                 while (freq <= end_hz if direction > 0 else freq >= end_hz):
@@ -657,6 +665,7 @@ class SDRRuntime:
                     freq += step
             finally:
                 self.scan_running = False
+                await self.set_sample_rate(self.listening_sample_rate)
 
 
 runtime = SDRRuntime()
@@ -843,6 +852,7 @@ class SDRWebSocketServer:
                 float(params.get("step_hz", 200_000)),
                 int(params.get("dwell_ms", 120)),
                 float(params.get("threshold", runtime.scan_threshold_db)),
+                float(params.get("squelch")) if params.get("squelch") is not None else None,
             )
         elif cmd == "scan_backward":
             result = await runtime.scan_directional(
@@ -850,6 +860,7 @@ class SDRWebSocketServer:
                 float(params.get("step_hz", 200_000)),
                 int(params.get("dwell_ms", 120)),
                 float(params.get("threshold", runtime.scan_threshold_db)),
+                float(params.get("squelch")) if params.get("squelch") is not None else None,
             )
         elif cmd == "set_low_cpu_mode":
             runtime.set_low_cpu_mode(bool(params.get("enabled", False)))

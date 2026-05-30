@@ -41,6 +41,23 @@
       <button id="setFreq">Set</button>
       <button data-preset="198000" data-mode="AM">BBC Radio 4 LW 198 kHz</button>
       <button data-preset="162000" data-mode="AM">France Inter 162 kHz</button>
+      <label>London FM
+        <select id="londonStation">
+          <option value="">Select…</option>
+          <option value="97500000|WFM">BBC Radio 1 (97.5)</option>
+          <option value="88900000|WFM">BBC Radio 2 (88.9)</option>
+          <option value="91300000|WFM">BBC Radio 3 (91.3)</option>
+          <option value="93300000|WFM">BBC Radio 4 (93.3)</option>
+          <option value="94200000|WFM">BBC Radio London (94.2)</option>
+          <option value="100800000|WFM">Classic FM (100.8)</option>
+          <option value="97300000|WFM">LBC (97.3)</option>
+          <option value="95800000|WFM">Capital (95.8)</option>
+          <option value="106200000|WFM">Heart (106.2)</option>
+          <option value="100000000|WFM">Kiss (100.0)</option>
+          <option value="105300000|WFM">TalkSport (105.3)</option>
+        </select>
+      </label>
+      <button id="tuneLondon">Tune station</button>
       <label>Gain
         <select id="gain"><option>auto</option><option>0</option><option>10</option><option>20</option><option>30</option><option>40</option><option>49.6</option></select>
       </label>
@@ -106,8 +123,11 @@
 <script>
 let ws, connected=false, audioCtx, audioEnabled=false, nextAudioTime=0;
 let audioQueue=[], audioBufferedSeconds=0, audioUnderruns=0, lastAudioStatusPush=0;
-let audioPreBuffering=true;
-const PREBUFFER_S = 0.3;
+let audioPreBuffering=true, audioNode=null, workletReady=false, workletBufferedSeconds=0, lastWorkletClock=0;
+let pendingSpectrum=null, pendingWaterfall=null, visualRenderScheduled=false;
+const PREBUFFER_S = 0.35;
+const TARGET_AUDIO_BUFFER_S = 0.5;
+const MAX_AUDIO_BUFFER_S = 2.0;
 const spec=document.getElementById('spec'), water=document.getElementById('water');
 const sctx=spec.getContext('2d'), wctx=water.getContext('2d');
 const conn=document.getElementById('conn'), err=document.getElementById('err');
@@ -146,9 +166,11 @@ function cmap(v, m){
 }
 
 function updateStats(st={}){
+  const freqInput=document.getElementById('freq');
+  if(document.activeElement!==freqInput && Number.isFinite(st.frequency_hz)) freqInput.value=String(Math.round(st.frequency_hz));
   statusEl.textContent=`Center ${Math.round(st.frequency_hz||0)} Hz | Rate ${Math.round(st.sample_rate||0)} | Gain ${st.gain??'n/a'} | Demod ${st.demod_mode||'n/a'}${st.low_cpu_mode?' | LOW CPU':''}`;
   const q=st.queue_depth||{};
-  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Visual FPS ${Number(st.visual_fps||0).toFixed(0)} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0} | Queue capture/audio/fft/ws ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.ws||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms`;
+  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Visual FPS ${Number(st.visual_fps||0).toFixed(0)} | Queues cap/audio/fft/spec/water ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.spectrum||0}/${q.waterfall||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms | Underruns ${st.audio_underruns||0} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0}`;
   if((st.audio_underruns||0) > 0) audioWarn.textContent=`Audio underruns: ${st.audio_underruns}`;
 }
 
@@ -202,47 +224,119 @@ function pushAudioChunk(pcmB64, rate){
   const duration=f32.length/rate;
   audioQueue.push({f32, rate, duration});
   audioBufferedSeconds += duration;
+  while(audioBufferedSeconds > MAX_AUDIO_BUFFER_S && audioQueue.length > 1){
+    const dropped=audioQueue.shift();
+    audioBufferedSeconds = Math.max(0, audioBufferedSeconds - dropped.duration);
+  }
+}
+
+function scheduleVisualRender(){
+  if(visualRenderScheduled) return;
+  visualRenderScheduled=true;
+  requestAnimationFrame(()=>{
+    visualRenderScheduled=false;
+    if(pendingSpectrum){ latestSpectrum=pendingSpectrum; drawSpectrum(pendingSpectrum); if(pendingSpectrum.status) updateStats(pendingSpectrum.status); pendingSpectrum=null; }
+    if(pendingWaterfall){ drawWaterfall(pendingWaterfall); if(pendingWaterfall.status) updateStats(pendingWaterfall.status); pendingWaterfall=null; }
+  });
 }
 
 function scheduleAudio(){
   if(!audioEnabled || !audioCtx) return;
+  if(workletReady){
+    const now=audioCtx.currentTime;
+    if(lastWorkletClock===0) lastWorkletClock=now;
+    workletBufferedSeconds=Math.max(0,workletBufferedSeconds-(now-lastWorkletClock));
+    lastWorkletClock=now;
 
-  // Pre-buffering phase: wait until we have enough audio queued before starting playback
-  if(audioPreBuffering){
-    if(audioBufferedSeconds < PREBUFFER_S) return;
-    audioPreBuffering = false;
-    nextAudioTime = audioCtx.currentTime + 0.05;
-  }
-
-  if(nextAudioTime < audioCtx.currentTime){
-    if(audioBufferedSeconds > 0.05){
-      audioUnderruns += 1;
-      audioWarn.textContent = `Audio underruns: ${audioUnderruns}`;
+    if(audioPreBuffering){
+      if(audioBufferedSeconds < PREBUFFER_S) return;
+      audioPreBuffering = false;
     }
-    nextAudioTime = audioCtx.currentTime + 0.06;
-  }
 
-  while(audioQueue.length && (nextAudioTime - audioCtx.currentTime) < 0.5){
-    const chunk=audioQueue.shift();
-    const buf=audioCtx.createBuffer(1,chunk.f32.length,chunk.rate);
-    buf.copyToChannel(chunk.f32,0);
-    const src=audioCtx.createBufferSource(); src.buffer=buf; src.connect(audioCtx.destination);
-    src.start(nextAudioTime);
-    nextAudioTime += chunk.duration;
-    audioBufferedSeconds = Math.max(0,audioBufferedSeconds - chunk.duration);
+    while(audioQueue.length && workletBufferedSeconds < TARGET_AUDIO_BUFFER_S){
+      const chunk=audioQueue.shift();
+      audioBufferedSeconds=Math.max(0,audioBufferedSeconds-chunk.duration);
+      workletBufferedSeconds += chunk.duration;
+      audioNode.port.postMessage({type:'chunk', pcm:chunk.f32}, [chunk.f32.buffer]);
+    }
+  } else {
+
+    // Pre-buffering phase: wait until we have enough audio queued before starting playback
+    if(audioPreBuffering){
+      if(audioBufferedSeconds < PREBUFFER_S) return;
+      audioPreBuffering = false;
+      nextAudioTime = audioCtx.currentTime + 0.05;
+    }
+
+    if(nextAudioTime < audioCtx.currentTime){
+      if(audioBufferedSeconds > 0.05){
+        audioUnderruns += 1;
+        audioWarn.textContent = `Audio underruns: ${audioUnderruns}`;
+      }
+      nextAudioTime = audioCtx.currentTime + 0.06;
+    }
+
+    while(audioQueue.length && (nextAudioTime - audioCtx.currentTime) < TARGET_AUDIO_BUFFER_S){
+      const chunk=audioQueue.shift();
+      const buf=audioCtx.createBuffer(1,chunk.f32.length,chunk.rate);
+      buf.copyToChannel(chunk.f32,0);
+      const src=audioCtx.createBufferSource(); src.buffer=buf; src.connect(audioCtx.destination);
+      src.start(nextAudioTime);
+      nextAudioTime += chunk.duration;
+      audioBufferedSeconds = Math.max(0,audioBufferedSeconds - chunk.duration);
+    }
   }
 
   const now=Date.now();
   if(now - lastAudioStatusPush > 1000){
     lastAudioStatusPush = now;
-    send('audio_buffer_status',{fill_ms:Math.max(0,(nextAudioTime - (audioCtx?.currentTime||0))*1000), underruns:audioUnderruns});
+    const fillMs=workletReady ? Math.max(0,(workletBufferedSeconds + audioBufferedSeconds)*1000) : Math.max(0,(nextAudioTime - (audioCtx?.currentTime||0))*1000);
+    send('audio_buffer_status',{fill_ms:fillMs, underruns:audioUnderruns});
   }
 }
 setInterval(scheduleAudio, 40);
 
-function ensureAudio(){
+async function ensureAudio(){
   if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
-  if(audioCtx.state === 'suspended') audioCtx.resume();
+  if(audioCtx.state === 'suspended') await audioCtx.resume();
+  if(!workletReady && audioCtx.audioWorklet){
+    try{
+      const src=`
+      class PCMPlayerProcessor extends AudioWorkletProcessor {
+        constructor(){
+          super();
+          this.queue=[]; this.current=null; this.offset=0; this.underruns=0; this.lastReport=0;
+          this.port.onmessage=(event)=>{ if(event.data?.type==='chunk' && event.data.pcm){ this.queue.push(new Float32Array(event.data.pcm)); } };
+        }
+        process(inputs, outputs){
+          const output=outputs[0][0];
+          for(let i=0;i<output.length;i++){
+            if(!this.current || this.offset>=this.current.length){ this.current=this.queue.shift()||null; this.offset=0; }
+            if(this.current){ output[i]=this.current[this.offset++]||0; }
+            else { output[i]=0; this.underruns++; }
+          }
+          if((currentTime-this.lastReport)>0.5){ this.lastReport=currentTime; this.port.postMessage({type:'underruns',count:this.underruns}); }
+          return true;
+        }
+      }
+      registerProcessor('pcm-player', PCMPlayerProcessor);`;
+      const blob=new Blob([src], {type:'application/javascript'});
+      const url=URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      audioNode = new AudioWorkletNode(audioCtx,'pcm-player');
+      audioNode.port.onmessage=(event)=>{
+        if(event.data?.type==='underruns' && Number.isFinite(event.data.count)){
+          audioUnderruns = Math.max(audioUnderruns, event.data.count);
+          if(audioUnderruns > 0) audioWarn.textContent = `Audio underruns: ${audioUnderruns}`;
+        }
+      };
+      audioNode.connect(audioCtx.destination);
+      workletReady = true;
+      URL.revokeObjectURL(url);
+    }catch{
+      workletReady = false;
+    }
+  }
   if(nextAudioTime < audioCtx.currentTime) nextAudioTime = audioCtx.currentTime + 0.08;
 }
 
@@ -320,8 +414,8 @@ function connect(){
       if(d.status) updateStats(d.status);
       if(d.command==='get_scan_results') scanStatus.textContent=d.running?'Scan running...':`Scan complete. ${d.results?.length||0} candidates`;
     }
-    else if(d.type==='spectrum'){ latestSpectrum=d; drawSpectrum(d); updateStats(d.status||{}); }
-    else if(d.type==='waterfall'){ drawWaterfall(d); updateStats(d.status||{}); }
+    else if(d.type==='spectrum'){ pendingSpectrum=d; scheduleVisualRender(); }
+    else if(d.type==='waterfall'){ pendingWaterfall=d; scheduleVisualRender(); }
     else if(d.type==='no_data'){ statusEl.textContent='No signal/data'; }
     else if(d.type==='audio' && d.pcm_b64){ if(audioEnabled){ ensureAudio(); pushAudioChunk(d.pcm_b64, d.sample_rate||48000); } if(d.status) updateStats(d.status); }
     else if(d.type==='config' && d.status){ updateStats(d.status); }
@@ -368,7 +462,8 @@ document.getElementById('scanFwdBtn').onclick=()=>{
   send('scan_forward',{
     step_hz:parseFloat(document.getElementById('scanStep').value||'200000'),
     dwell_ms:parseInt(document.getElementById('scanDwell').value||'120',10),
-    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45')
+    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45'),
+    squelch:parseFloat(document.getElementById('scanSquelch').value||'0')
   });
   scanStatus.textContent='Forward scan started…';
 };
@@ -376,11 +471,23 @@ document.getElementById('scanBackBtn').onclick=()=>{
   send('scan_backward',{
     step_hz:parseFloat(document.getElementById('scanStep').value||'200000'),
     dwell_ms:parseInt(document.getElementById('scanDwell').value||'120',10),
-    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45')
+    threshold:parseFloat(document.getElementById('scanThreshold').value||'-45'),
+    squelch:parseFloat(document.getElementById('scanSquelch').value||'0')
   });
   scanStatus.textContent='Backward scan started…';
 };
 document.getElementById('scanRefresh').onclick=()=>send('get_scan_results');
+
+document.getElementById('tuneLondon').onclick=()=>{
+  const val=document.getElementById('londonStation').value;
+  if(!val) return;
+  const [f,m]=val.split('|');
+  if(!f || !m) return;
+  document.getElementById('freq').value=f;
+  document.getElementById('demod').value=m;
+  send('set_frequency',{frequency:parseFloat(f)});
+  send('set_demod_mode',{mode:m});
+};
 
 function collectPresetPayload(){
   return {
