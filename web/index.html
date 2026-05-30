@@ -39,8 +39,6 @@
     <div class="row">
       <label>Frequency (Hz) <input id="freq" value="198000" /></label>
       <button id="setFreq">Set</button>
-      <button data-preset="198000" data-mode="AM">BBC Radio 4 LW 198 kHz</button>
-      <button data-preset="162000" data-mode="AM">France Inter 162 kHz</button>
       <label>London FM
         <select id="londonStation">
           <option value="">Select…</option>
@@ -75,6 +73,11 @@
       <label><input id="lowCpuToggle" type="checkbox"> Low CPU mode</label>
     </div>
     <div id="status" class="muted" style="margin-top:6px;">No signal/data</div>
+    <div id="rdsInfo" style="margin-top:4px;display:none;">
+      <span id="rdsPs" style="font-weight:600;color:#67e8f9;"></span>
+      <span id="rdsPty" class="muted" style="margin-left:6px;"></span>
+      <div id="rdsRt" class="muted" style="font-size:12px;margin-top:2px;"></div>
+    </div>
     <div id="perf" class="muted" style="margin-top:4px;">Performance stats unavailable</div>
   </div>
 
@@ -140,6 +143,7 @@ const scanResultsEl=document.getElementById('scanResults');
 const presetStatus=document.getElementById('presetStatus');
 const presetList=document.getElementById('presetList');
 let latestSpectrum=null;
+let currentRDS={ps:'',pi:'',rt:'',pty:0,pty_name:'',tp:false,ta:false};
 
 // Load version info from /version endpoint
 fetch('/version').then(r=>r.ok?r.json():null).then(v=>{
@@ -170,8 +174,29 @@ function updateStats(st={}){
   if(document.activeElement!==freqInput && Number.isFinite(st.frequency_hz)) freqInput.value=String(Math.round(st.frequency_hz));
   statusEl.textContent=`Center ${Math.round(st.frequency_hz||0)} Hz | Rate ${Math.round(st.sample_rate||0)} | Gain ${st.gain??'n/a'} | Demod ${st.demod_mode||'n/a'}${st.low_cpu_mode?' | LOW CPU':''}`;
   const q=st.queue_depth||{};
-  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Visual FPS ${Number(st.visual_fps||0).toFixed(0)} | Queues cap/audio/fft/spec/water ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.spectrum||0}/${q.waterfall||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms | Underruns ${st.audio_underruns||0} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0}`;
+  perfEl.textContent=`IQ/s ${Math.round(st.samples_per_sec||0)} | FFT FPS ${Number(st.fft_fps||0).toFixed(1)} | Visual FPS ${Number(st.visual_fps||0).toFixed(0)} | Queues cap/audio/fft/rds/spec/water ${q.capture||0}/${q.audio||0}/${q.fft||0}/${q.rds||0}/${q.spectrum||0}/${q.waterfall||0} | Audio buffer ${Number(st.audio_buffer_fill_ms||0).toFixed(0)}ms | Underruns ${st.audio_underruns||0} | Dropped audio ${st.dropped_audio_frames||0} | Dropped visual ${st.dropped_visual_frames||0}`;
   if((st.audio_underruns||0) > 0) audioWarn.textContent=`Audio underruns: ${st.audio_underruns}`;
+  // Keep RDS name hint in preset field when frequency changes
+  if(st.rds_ps === '' && currentRDS.ps) updateRDS({ps:'',pi:'',rt:'',pty:0,pty_name:'',tp:false,ta:false});
+}
+
+function updateRDS(rds){
+  currentRDS = rds;
+  const rdsInfoEl = document.getElementById('rdsInfo');
+  const rdsPsEl = document.getElementById('rdsPs');
+  const rdsPtyEl = document.getElementById('rdsPty');
+  const rdsRtEl = document.getElementById('rdsRt');
+  if(!rds.ps && !rds.rt){
+    rdsInfoEl.style.display='none';
+    return;
+  }
+  rdsInfoEl.style.display='';
+  rdsPsEl.textContent = rds.ps || '';
+  rdsPtyEl.textContent = rds.pty_name ? `[${rds.pty_name}]` : '';
+  rdsRtEl.textContent = rds.rt ? `📻 ${rds.rt}` : '';
+  // Auto-fill preset name only when field is empty
+  const presetNameInput = document.getElementById('presetName');
+  if(rds.ps && !presetNameInput.value) presetNameInput.value = rds.ps;
 }
 
 function drawSpectrum(data){
@@ -353,14 +378,19 @@ function renderScanResults(results=[]){
       document.getElementById('demod').value=r.mode;
       send('set_frequency',{frequency:r.frequency_hz});
       send('set_demod_mode',{mode:r.mode});
+      // Clear preset name so RDS auto-fill can suggest one after tuning
+      document.getElementById('presetName').value='';
     };
     const saveBtn=document.createElement('button'); saveBtn.textContent='Save';
     saveBtn.onclick=()=>{
-      const name=prompt('Preset name for '+Math.round(r.frequency_hz)+' Hz:');
+      const defaultName = currentRDS.ps || (Math.round(r.frequency_hz/1e6*10)/10+' MHz');
+      const name=prompt('Preset name for '+Math.round(r.frequency_hz)+' Hz:', defaultName);
       if(name && name.trim()) send('save_preset',{
         name:name.trim(), frequency_hz:r.frequency_hz,
         mode:r.mode, sample_rate:parseFloat(document.getElementById('rate').value||'2048000'),
-        gain:document.getElementById('gain').value, notes:''
+        gain:document.getElementById('gain').value, notes:'',
+        rds_ps:currentRDS.ps||'', rds_pi:currentRDS.pi||'',
+        rds_rt:currentRDS.rt||'', rds_pty:currentRDS.pty||0,
       });
     };
     controls.append(tuneBtn, saveBtn);
@@ -374,7 +404,8 @@ function renderPresets(presets=[]){
   if(!presets.length){ presetList.innerHTML='<div class="muted">No saved presets</div>'; return; }
   for(const p of presets){
     const row=document.createElement('div'); row.className='item';
-    row.innerHTML=`<span><strong>${p.name}</strong> ${Math.round(p.frequency)} Hz ${p.mode} @ ${Math.round(p.sample_rate)} | gain ${p.gain}${p.notes?` — ${p.notes}`:''}</span>`;
+    const rdsHint = p.rds_metadata?.ps ? ` 📻 ${p.rds_metadata.ps}` : '';
+    row.innerHTML=`<span><strong>${p.name}</strong>${rdsHint} ${Math.round(p.frequency)} Hz ${p.mode} @ ${Math.round(p.sample_rate)} | gain ${p.gain}${p.notes?` — ${p.notes}`:''}</span>`;
     const controls=document.createElement('span');
     const tune=document.createElement('button'); tune.textContent='Tune'; tune.onclick=()=>send('tune_preset',{name:p.name});
     const edit=document.createElement('button'); edit.textContent='Edit'; edit.onclick=()=>{
@@ -385,8 +416,13 @@ function renderPresets(presets=[]){
       document.getElementById('rate').value=String(p.sample_rate);
       document.getElementById('gain').value=String(p.gain);
     };
+    const rename=document.createElement('button'); rename.textContent='Rename'; rename.onclick=()=>{
+      const newName=prompt('New name for preset:', p.name);
+      if(newName && newName.trim() && newName.trim()!==p.name)
+        send('edit_preset',{name:p.name, new_name:newName.trim()});
+    };
     const del=document.createElement('button'); del.textContent='Delete'; del.onclick=()=>send('delete_preset',{name:p.name});
-    controls.append(tune,edit,del);
+    controls.append(tune,edit,rename,del);
     row.appendChild(controls);
     presetList.appendChild(row);
   }
@@ -406,7 +442,7 @@ function connect(){
       if(!d.success) err.textContent=d.message||'Command failed';
       if(d.command==='get_scan_results' && d.results) renderScanResults(d.results);
       if(d.command==='scan' || d.command==='scan_forward' || d.command==='scan_backward') scanStatus.textContent=d.message||'Scan started';
-      if(['save_preset','delete_preset','tune_preset','list_presets'].includes(d.command)){
+      if(['save_preset','delete_preset','tune_preset','list_presets','edit_preset'].includes(d.command)){
         if(d.presets) renderPresets(d.presets);
         if(d.preset && d.command!=='delete_preset') presetStatus.textContent=`Preset: ${d.preset.name}`;
         if(d.command!=='list_presets') send('list_presets');
@@ -417,22 +453,16 @@ function connect(){
     else if(d.type==='spectrum'){ pendingSpectrum=d; scheduleVisualRender(); }
     else if(d.type==='waterfall'){ pendingWaterfall=d; scheduleVisualRender(); }
     else if(d.type==='no_data'){ statusEl.textContent='No signal/data'; }
+    else if(d.type==='rds_update'){ updateRDS(d); if(d.status) updateStats(d.status); }
     else if(d.type==='audio' && d.pcm_b64){ if(audioEnabled){ ensureAudio(); pushAudioChunk(d.pcm_b64, d.sample_rate||48000); } if(d.status) updateStats(d.status); }
     else if(d.type==='config' && d.status){ updateStats(d.status); }
   };
 }
 
 document.getElementById('connectBtn').onclick=()=>{ if(!connected) connect(); else ws.close(); };
-document.getElementById('setFreq').onclick=()=>send('set_frequency',{frequency:parseFloat(document.getElementById('freq').value||'0')});
 document.getElementById('gain').onchange=(e)=>send('set_gain',{gain:e.target.value});
 document.getElementById('rate').onchange=(e)=>send('set_sample_rate',{sample_rate:parseFloat(e.target.value)});
 document.getElementById('demod').onchange=(e)=>send('set_demod_mode',{mode:e.target.value});
-for(const b of document.querySelectorAll('button[data-preset]')) b.onclick=()=>{
-  const f=parseFloat(b.dataset.preset); const m=b.dataset.mode;
-  document.getElementById('freq').value=String(f);
-  document.getElementById('demod').value=m;
-  send('set_frequency',{frequency:f}); send('set_demod_mode',{mode:m});
-};
 document.getElementById('audioBtn').onclick=(e)=>{
   audioEnabled=!audioEnabled;
   e.target.textContent=audioEnabled?'Stop':'Play';
@@ -478,6 +508,13 @@ document.getElementById('scanBackBtn').onclick=()=>{
 };
 document.getElementById('scanRefresh').onclick=()=>send('get_scan_results');
 
+document.getElementById('setFreq').onclick=()=>{
+  // Clear RDS info when user manually tunes to a new frequency
+  updateRDS({ps:'',pi:'',rt:'',pty:0,pty_name:'',tp:false,ta:false});
+  document.getElementById('presetName').value='';
+  send('set_frequency',{frequency:parseFloat(document.getElementById('freq').value||'0')});
+};
+
 document.getElementById('tuneLondon').onclick=()=>{
   const val=document.getElementById('londonStation').value;
   if(!val) return;
@@ -485,6 +522,9 @@ document.getElementById('tuneLondon').onclick=()=>{
   if(!f || !m) return;
   document.getElementById('freq').value=f;
   document.getElementById('demod').value=m;
+  // Clear RDS when changing station
+  updateRDS({ps:'',pi:'',rt:'',pty:0,pty_name:'',tp:false,ta:false});
+  document.getElementById('presetName').value='';
   send('set_frequency',{frequency:parseFloat(f)});
   send('set_demod_mode',{mode:m});
 };
@@ -496,7 +536,9 @@ function collectPresetPayload(){
     mode:document.getElementById('demod').value,
     sample_rate:parseFloat(document.getElementById('rate').value||'2048000'),
     gain:document.getElementById('gain').value,
-    notes:document.getElementById('presetNotes').value||''
+    notes:document.getElementById('presetNotes').value||'',
+    rds_ps:currentRDS.ps||'', rds_pi:currentRDS.pi||'',
+    rds_rt:currentRDS.rt||'', rds_pty:currentRDS.pty||0,
   };
 }
 document.getElementById('savePreset').onclick=()=>send('save_preset',collectPresetPayload());

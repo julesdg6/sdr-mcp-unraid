@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import websockets
-from scipy.signal import resample_poly
+from scipy.signal import butter, resample_poly, sosfilt, sosfilt_zi
 from websockets.exceptions import ConnectionClosed
 
 from sdr_mcp.capture import SDRCapture
@@ -32,6 +32,286 @@ DEFAULT_VISUAL_FPS = 12.0
 LOW_CPU_VISUAL_FPS = 5.0
 
 
+class RDSDecoder:
+    """Software RDS decoder for WFM stations.
+
+    Extracts Programme Service (PS), Programme Identifier (PI), Radio Text (RT),
+    Programme Type (PTY), Traffic Programme (TP), and Traffic Announcement (TA)
+    from the FM baseband phase signal.  Works best on strong, clean signals.
+    """
+
+    RDS_BAUD = 1187.5
+    RDS_CARRIER = 57_000.0
+
+    PTY_NAMES: dict[int, str] = {
+        0: "", 1: "News", 2: "Current Affairs", 3: "Information",
+        4: "Sport", 5: "Education", 6: "Drama", 7: "Culture",
+        8: "Science", 9: "Varied", 10: "Pop Music", 11: "Rock Music",
+        12: "Easy Listening", 13: "Light Classical", 14: "Serious Classical",
+        15: "Other Music", 16: "Weather", 17: "Finance",
+        18: "Children's", 19: "Social Affairs", 20: "Religion",
+        21: "Phone In", 22: "Travel", 23: "Leisure", 24: "Jazz",
+        25: "Country", 26: "National Music", 27: "Oldies",
+        28: "Folk", 29: "Documentary", 30: "Alarm Test", 31: "Alarm",
+    }
+
+    # Generator: x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1 = 0b10110111001
+    _POLY = 0x5B9
+    # Offset words (syndromes per block position)
+    _OFFSET_A = 0x3D8
+    _OFFSET_B = 0x3D4
+    _OFFSET_C = 0x25C
+    _OFFSET_Cp = 0x3CC
+    _OFFSET_D = 0x258
+
+    def __init__(self) -> None:
+        self.ps = ""
+        self.pi = 0
+        self.rt = ""
+        self.pty = 0
+        self.pty_name = ""
+        self.tp = False
+        self.ta = False
+
+        self._ps_segs: dict[int, str] = {}
+        self._rt_segs: dict[int, str] = {}
+        self._rt_ab = -1
+
+        self._bpf_sos: np.ndarray | None = None
+        self._lpf_sos: np.ndarray | None = None
+        self._bpf_zi: np.ndarray | None = None
+        self._lpf_zi: np.ndarray | None = None
+        self._sample_rate: float = 0.0
+        self._carrier_phase: float = 0.0
+        self._sym_samples: float = 0.0
+        self._sym_offset: float = 0.0
+        self._last_bit: int = 0
+        self._bit_buf: list[int] = []
+        self._updated: bool = False
+
+    def clear(self) -> None:
+        self.ps = ""
+        self.pi = 0
+        self.rt = ""
+        self.pty = 0
+        self.pty_name = ""
+        self.tp = False
+        self.ta = False
+        self._ps_segs = {}
+        self._rt_segs = {}
+        self._rt_ab = -1
+        self._bpf_zi = None
+        self._lpf_zi = None
+        self._carrier_phase = 0.0
+        self._sym_offset = 0.0
+        self._last_bit = 0
+        self._bit_buf = []
+
+    def _init_filters(self, sr: float) -> None:
+        nyq = sr / 2.0
+        blo = (self.RDS_CARRIER - 2_400) / nyq
+        bhi = (self.RDS_CARRIER + 2_400) / nyq
+        if 0 < blo < 1 and 0 < bhi < 1 and blo < bhi:
+            self._bpf_sos = butter(4, [blo, bhi], btype="band", output="sos")
+        else:
+            self._bpf_sos = None
+        lpfc = 2_400 / nyq
+        if 0 < lpfc < 1:
+            self._lpf_sos = butter(4, lpfc, output="sos")
+        else:
+            self._lpf_sos = None
+        self._sample_rate = sr
+        self._sym_samples = sr / self.RDS_BAUD
+        self._bpf_zi = None
+        self._lpf_zi = None
+
+    def process(self, fm_phase: np.ndarray, sample_rate: float) -> bool:
+        """Process FM demodulated phase samples. Returns True when RDS data changes."""
+        if sample_rate < 2.0 * self.RDS_CARRIER + 5_000:
+            return False
+        if sample_rate != self._sample_rate or self._bpf_sos is None:
+            self._init_filters(sample_rate)
+        if self._bpf_sos is None or self._lpf_sos is None:
+            return False
+
+        sig = fm_phase.astype(np.float64)
+
+        # Bandpass around 57 kHz
+        if self._bpf_zi is None:
+            self._bpf_zi = sosfilt_zi(self._bpf_sos) * float(sig[0])
+        bp, self._bpf_zi = sosfilt(self._bpf_sos, sig, zi=self._bpf_zi)
+
+        # Mix down to DC
+        n = len(bp)
+        phase0 = self._carrier_phase
+        cos_c = np.cos(2 * np.pi * self.RDS_CARRIER / sample_rate * np.arange(n) + phase0)
+        mixed = bp * cos_c
+        self._carrier_phase = float(
+            (phase0 + 2 * np.pi * self.RDS_CARRIER * n / sample_rate) % (2 * np.pi)
+        )
+
+        # Low-pass filter
+        if self._lpf_zi is None:
+            self._lpf_zi = sosfilt_zi(self._lpf_sos) * float(mixed[0])
+        lp, self._lpf_zi = sosfilt(self._lpf_sos, mixed, zi=self._lpf_zi)
+
+        # Symbol clock extraction and bit decisions
+        self._updated = False
+        i = 0
+        while i < len(lp):
+            step = self._sym_samples - self._sym_offset
+            ni = i + step
+            if ni > len(lp):
+                self._sym_offset += len(lp) - i
+                break
+            mid = max(0, min(len(lp) - 1, int(i + step / 2)))
+            bit = 1 if lp[mid] > 0 else 0
+            # Differential decode
+            diff = bit ^ self._last_bit
+            self._last_bit = bit
+            self._bit_buf.append(diff)
+            if len(self._bit_buf) > 300:
+                self._bit_buf = self._bit_buf[-300:]
+            self._sym_offset = 0.0
+            i = int(ni)
+
+        # Consume bits looking for valid RDS groups
+        while len(self._bit_buf) >= 26:
+            self._try_sync()
+
+        return self._updated
+
+    def _syndrome(self, word26: int) -> int:
+        crc = 0
+        for i in range(25, -1, -1):
+            b = (word26 >> i) & 1
+            crc = ((crc << 1) | b) ^ (self._POLY if crc & 0x200 else 0)
+            crc &= 0x3FF
+        return crc
+
+    def _read_block(self, start: int) -> tuple[int, int]:
+        word = 0
+        for b in self._bit_buf[start : start + 26]:
+            word = (word << 1) | b
+        return word >> 10, self._syndrome(word)
+
+    def _try_sync(self) -> None:
+        if len(self._bit_buf) < 26:
+            return
+        _, syn = self._read_block(0)
+        if syn == self._OFFSET_A and len(self._bit_buf) >= 104:
+            self._decode_group()
+            self._bit_buf = self._bit_buf[104:]
+        else:
+            self._bit_buf = self._bit_buf[1:]
+
+    def _decode_group(self) -> None:
+        blks: list[int] = []
+        ok: list[bool] = []
+        for i in range(4):
+            data, syn = self._read_block(i * 26)
+            if i == 0:
+                valid = syn == self._OFFSET_A
+            elif i == 1:
+                valid = syn == self._OFFSET_B
+            elif i == 2:
+                valid = syn in (self._OFFSET_C, self._OFFSET_Cp)
+            else:
+                valid = syn == self._OFFSET_D
+            blks.append(data)
+            ok.append(valid)
+
+        if not ok[0] or not ok[1]:
+            return
+
+        pi = blks[0]
+        b = blks[1]
+        group_type = (b >> 12) & 0xF
+        version = (b >> 11) & 1  # 0 = A, 1 = B
+        tp = bool((b >> 10) & 1)
+        pty = (b >> 5) & 0x1F
+
+        if pi and pi != self.pi:
+            self.pi = pi
+            self._updated = True
+        if tp != self.tp:
+            self.tp = tp
+            self._updated = True
+        if pty != self.pty:
+            self.pty = pty
+            self.pty_name = self.PTY_NAMES.get(pty, f"PTY{pty}")
+            self._updated = True
+
+        if group_type == 0:
+            # Groups 0A/0B: PS name and TA flag
+            ta = bool((b >> 4) & 1)
+            seg = b & 3
+            if ok[3]:
+                d = blks[3]
+                c0, c1 = (d >> 8) & 0xFF, d & 0xFF
+                for off, ch in enumerate((c0, c1)):
+                    if 0x20 <= ch < 0x80:
+                        self._ps_segs[seg * 2 + off] = chr(ch)
+                if len(self._ps_segs) >= 8:
+                    new_ps = "".join(self._ps_segs.get(i, " ") for i in range(8)).strip()
+                    if new_ps and new_ps != self.ps:
+                        self.ps = new_ps
+                        self._updated = True
+            if ta != self.ta:
+                self.ta = ta
+                self._updated = True
+
+        elif group_type == 2:
+            # Groups 2A/2B: Radio Text
+            ab_flag = (b >> 4) & 1
+            seg = b & 0xF
+            if ab_flag != self._rt_ab:
+                self._rt_ab = ab_flag
+                self._rt_segs = {}
+
+            if version == 0 and ok[2] and ok[3]:
+                # Group 2A: 4 chars (2 from C, 2 from D)
+                base = seg * 4
+                chars = [
+                    (blks[2] >> 8) & 0xFF, blks[2] & 0xFF,
+                    (blks[3] >> 8) & 0xFF, blks[3] & 0xFF,
+                ]
+                for off, ch in enumerate(chars):
+                    if ch == 0x0D:
+                        break
+                    if 0x20 <= ch < 0x80:
+                        self._rt_segs[base + off] = chr(ch)
+            elif version == 1 and ok[3]:
+                # Group 2B: 2 chars from D only
+                base = seg * 2
+                chars = [(blks[3] >> 8) & 0xFF, blks[3] & 0xFF]
+                for off, ch in enumerate(chars):
+                    if ch == 0x0D:
+                        break
+                    if 0x20 <= ch < 0x80:
+                        self._rt_segs[base + off] = chr(ch)
+
+            if self._rt_segs:
+                max_pos = max(self._rt_segs)
+                new_rt = "".join(
+                    self._rt_segs.get(i, "") for i in range(max_pos + 1)
+                ).strip()
+                if new_rt and new_rt != self.rt:
+                    self.rt = new_rt
+                    self._updated = True
+
+    def get_info(self) -> dict[str, Any]:
+        return {
+            "ps": self.ps,
+            "pi": f"0x{self.pi:04X}" if self.pi else "",
+            "rt": self.rt,
+            "pty": self.pty,
+            "pty_name": self.pty_name,
+            "tp": self.tp,
+            "ta": self.ta,
+        }
+
+
 class SDRRuntime:
     def __init__(self):
         self.capture = SDRCapture()
@@ -44,6 +324,7 @@ class SDRRuntime:
         self.samples_count = 0
         self.samples_per_sec = 0.0
         self._lock = asyncio.Lock()
+        self.rds = RDSDecoder()
 
         self.presets_file = Path(os.getenv("SDR_PRESETS_FILE", "/config/presets.json"))
         self.presets: dict[str, dict[str, Any]] = {}
@@ -58,6 +339,7 @@ class SDRRuntime:
         self.capture_queue = asyncio.Queue(maxsize=8)
         self.audio_queue = asyncio.Queue(maxsize=16)
         self.fft_queue = asyncio.Queue(maxsize=4)
+        self.rds_queue: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=2)
         self.spectrum_queue = asyncio.Queue(maxsize=2)
         self.waterfall_queue = asyncio.Queue(maxsize=2)
         self.visual_out_queue = asyncio.Queue(maxsize=16)
@@ -131,6 +413,7 @@ class SDRRuntime:
             asyncio.create_task(self._capture_loop(), name="capture_loop"),
             asyncio.create_task(self._audio_demod_loop(), name="audio_demod_loop"),
             asyncio.create_task(self._fft_loop(), name="fft_loop"),
+            asyncio.create_task(self._rds_loop(), name="rds_loop"),
             asyncio.create_task(self._spectrum_loop(), name="spectrum_loop"),
             asyncio.create_task(self._waterfall_loop(), name="waterfall_loop"),
             asyncio.create_task(self._ws_mux_loop(), name="ws_mux_loop"),
@@ -177,6 +460,9 @@ class SDRRuntime:
                     self.dropped_audio_frames += 1
                 if dropped_fft:
                     self.dropped_visual_frames += 1
+
+                if self.demod_mode == "WFM":
+                    self._drop_put(self.rds_queue, samples)
 
                 if self.scan_running:
                     self._drop_put(self._scan_samples, samples)
@@ -321,6 +607,26 @@ class SDRRuntime:
             except Exception as exc:  # noqa: BLE001
                 logger.error("waterfall loop error: %s", exc)
 
+    async def _rds_loop(self) -> None:
+        """Decode RDS from WFM FM baseband. Runs at low priority; audio is never blocked."""
+        while self.running:
+            try:
+                samples = await self.rds_queue.get()
+                if self.demod_mode != "WFM":
+                    continue
+                iq = samples.astype(np.complex64)
+                phase = np.angle(iq[1:] * np.conj(iq[:-1]))
+                updated = self.rds.process(phase, float(self.capture.sample_rate))
+                if updated:
+                    self._drop_put(
+                        self.visual_out_queue,
+                        {"type": "rds_update", **self.rds.get_info(), "status": self.get_status()},
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error("rds loop error: %s", exc)
+
     async def _ws_mux_loop(self) -> None:
         while self.running:
             try:
@@ -368,6 +674,7 @@ class SDRRuntime:
     async def set_frequency(self, freq_hz: float) -> bool:
         ok = await self.capture.set_frequency(freq_hz)
         if ok:
+            self.rds.clear()
             self.log_status("tuned")
         return ok
 
@@ -394,11 +701,14 @@ class SDRRuntime:
         mode = mode.upper()
         if mode not in VALID_DEMODES:
             return False
-        self.demod_mode = mode
-        self.log_status("demod-updated")
+        if mode != self.demod_mode:
+            self.demod_mode = mode
+            self.rds.clear()
+            self.log_status("demod-updated")
         return True
 
     def get_status(self) -> dict[str, Any]:
+        rds = self.rds.get_info()
         return {
             "initialized": self.capture.sdr is not None,
             "audio_streaming": self.audio_enabled,
@@ -418,14 +728,20 @@ class SDRRuntime:
                 "capture": self.capture_queue.qsize(),
                 "audio": self.audio_out_queue.qsize(),
                 "fft": self.fft_queue.qsize(),
+                "rds": self.rds_queue.qsize(),
                 "spectrum": self.spectrum_queue.qsize(),
                 "waterfall": self.waterfall_queue.qsize(),
                 "ws": self.ws_queue.qsize(),
             },
             "scan_running": self.scan_running,
             "scan_results": len(self.scan_results),
+            "rds_ps": rds["ps"],
             "init_error": self.init_error,
         }
+
+    def get_rds_info(self) -> dict[str, Any]:
+        """Return current RDS decoded data."""
+        return {"success": True, **self.rds.get_info()}
 
     async def start_scan(
         self,
@@ -521,6 +837,10 @@ class SDRRuntime:
         sample_rate: float,
         gain: str,
         notes: str,
+        rds_ps: str = "",
+        rds_pi: str = "",
+        rds_rt: str = "",
+        rds_pty: int = 0,
     ) -> dict[str, Any]:
         clean_name = name.strip()
         if not clean_name:
@@ -529,6 +849,16 @@ class SDRRuntime:
         if mode not in VALID_DEMODES:
             return {"success": False, "message": "Invalid demod mode", "status": self.get_status()}
 
+        rds_meta: dict[str, Any] = {}
+        if rds_ps:
+            rds_meta["ps"] = rds_ps
+        if rds_pi:
+            rds_meta["pi"] = rds_pi
+        if rds_rt:
+            rds_meta["rt"] = rds_rt
+        if rds_pty:
+            rds_meta["pty"] = rds_pty
+
         self.presets[clean_name] = {
             "name": clean_name,
             "frequency": float(frequency_hz),
@@ -536,9 +866,54 @@ class SDRRuntime:
             "sample_rate": float(sample_rate),
             "gain": str(gain),
             "notes": notes or "",
+            "rds_metadata": rds_meta,
         }
         self._save_presets_file()
         return {"success": True, "message": "Preset saved", "preset": self.presets[clean_name], "status": self.get_status()}
+
+    async def edit_preset(
+        self,
+        name: str,
+        new_name: str | None = None,
+        frequency_hz: float | None = None,
+        mode: str | None = None,
+        sample_rate: float | None = None,
+        gain: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit an existing preset. Only supplied fields are changed."""
+        if name not in self.presets:
+            return {"success": False, "message": "Preset not found", "status": self.get_status()}
+
+        preset = dict(self.presets[name])
+
+        if new_name is not None:
+            clean = new_name.strip()
+            if not clean:
+                return {"success": False, "message": "New name cannot be empty", "status": self.get_status()}
+            if clean != name and clean in self.presets:
+                return {"success": False, "message": "A preset with that name already exists", "status": self.get_status()}
+            del self.presets[name]
+            preset["name"] = clean
+            name = clean
+
+        if frequency_hz is not None:
+            preset["frequency"] = float(frequency_hz)
+        if mode is not None:
+            m = mode.upper()
+            if m not in VALID_DEMODES:
+                return {"success": False, "message": "Invalid demod mode", "status": self.get_status()}
+            preset["mode"] = m
+        if sample_rate is not None:
+            preset["sample_rate"] = float(sample_rate)
+        if gain is not None:
+            preset["gain"] = str(gain)
+        if notes is not None:
+            preset["notes"] = notes
+
+        self.presets[name] = preset
+        self._save_presets_file()
+        return {"success": True, "message": "Preset updated", "preset": preset, "status": self.get_status()}
 
     async def list_presets(self) -> dict[str, Any]:
         presets = sorted(self.presets.values(), key=lambda item: item["name"].lower())
@@ -739,9 +1114,16 @@ async def sdr_save_preset(
     sample_rate: float,
     gain: str,
     notes: str,
+    rds_ps: str = "",
+    rds_pi: str = "",
+    rds_rt: str = "",
+    rds_pty: int = 0,
 ) -> dict[str, Any]:
-    """Save a named SDR preset."""
-    return await runtime.save_preset(name, frequency_hz, mode, sample_rate, gain, notes)
+    """Save a named SDR preset (optionally including RDS metadata)."""
+    return await runtime.save_preset(
+        name, frequency_hz, mode, sample_rate, gain, notes,
+        rds_ps=rds_ps, rds_pi=rds_pi, rds_rt=rds_rt, rds_pty=rds_pty,
+    )
 
 
 @mcp.tool()
@@ -760,6 +1142,74 @@ async def sdr_delete_preset(name: str) -> dict[str, Any]:
 async def sdr_tune_preset(name: str) -> dict[str, Any]:
     """Tune SDR to a saved preset."""
     return await runtime.tune_preset(name)
+
+
+@mcp.tool()
+async def sdr_edit_preset(
+    name: str,
+    new_name: str | None = None,
+    frequency_hz: float | None = None,
+    mode: str | None = None,
+    sample_rate: float | None = None,
+    gain: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Edit an existing SDR preset. Only the supplied fields are updated; omitted fields are unchanged."""
+    return await runtime.edit_preset(name, new_name, frequency_hz, mode, sample_rate, gain, notes)
+
+
+@mcp.tool()
+async def sdr_get_rds() -> dict[str, Any]:
+    """Return current RDS data decoded from the WFM signal: PS (station name), RT (radio text), PTY, PI, TP, TA."""
+    return runtime.get_rds_info()
+
+
+@mcp.tool()
+async def sdr_get_audio_stats() -> dict[str, Any]:
+    """Return audio streaming statistics: buffer fill, underrun count, dropped frames, queue depth."""
+    return {
+        "success": True,
+        "audio_enabled": runtime.audio_enabled,
+        "audio_buffer_fill_ms": runtime.browser_audio_buffer_ms,
+        "audio_underruns": runtime.browser_audio_underruns,
+        "dropped_audio_frames": runtime.dropped_audio_frames,
+        "audio_sample_rate": runtime.audio_sample_rate,
+        "audio_out_queue_depth": runtime.audio_out_queue.qsize(),
+    }
+
+
+@mcp.tool()
+async def sdr_get_visual_stats() -> dict[str, Any]:
+    """Return visualisation pipeline statistics: FFT FPS, visual FPS, dropped frames, queue depths."""
+    return {
+        "success": True,
+        "fft_fps": runtime.fft_fps,
+        "visual_fps": runtime.visual_fps,
+        "dropped_visual_frames": runtime.dropped_visual_frames,
+        "low_cpu_mode": runtime.low_cpu_mode,
+        "fft_queue_depth": runtime.fft_queue.qsize(),
+        "spectrum_queue_depth": runtime.spectrum_queue.qsize(),
+        "waterfall_queue_depth": runtime.waterfall_queue.qsize(),
+    }
+
+
+@mcp.tool()
+async def sdr_get_version() -> dict[str, Any]:
+    """Return build version information: version string, git commit, build time, image tag."""
+    version_file = Path("/opt/web_sota/version.json")
+    data: dict[str, Any] = {}
+    try:
+        data = json.loads(version_file.read_text())
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "success": True,
+        "version": data.get("version", os.getenv("APP_VERSION", "unknown")),
+        "git_commit": data.get("git_commit", os.getenv("GIT_COMMIT", "unknown")),
+        "build_time": data.get("build_time", os.getenv("BUILD_TIME", "unknown")),
+        "image_tag": data.get("image_tag", os.getenv("IMAGE_TAG", "unknown")),
+        "branch": data.get("branch", "unknown"),
+    }
 
 
 class SDRWebSocketServer:
@@ -833,6 +1283,10 @@ class SDRWebSocketServer:
                 float(params.get("sample_rate", runtime.capture.sample_rate)),
                 str(params.get("gain", runtime.capture.gain)),
                 str(params.get("notes", "")),
+                rds_ps=str(params.get("rds_ps", "")),
+                rds_pi=str(params.get("rds_pi", "")),
+                rds_rt=str(params.get("rds_rt", "")),
+                rds_pty=int(params.get("rds_pty", 0)),
             )
         elif cmd == "list_presets":
             result = await runtime.list_presets()
@@ -840,6 +1294,18 @@ class SDRWebSocketServer:
             result = await runtime.delete_preset(str(params.get("name", "")))
         elif cmd == "tune_preset":
             result = await runtime.tune_preset(str(params.get("name", "")))
+        elif cmd == "edit_preset":
+            result = await runtime.edit_preset(
+                str(params.get("name", "")),
+                new_name=params.get("new_name"),
+                frequency_hz=float(params["frequency_hz"]) if params.get("frequency_hz") is not None else None,
+                mode=str(params["mode"]) if params.get("mode") is not None else None,
+                sample_rate=float(params["sample_rate"]) if params.get("sample_rate") is not None else None,
+                gain=str(params["gain"]) if params.get("gain") is not None else None,
+                notes=str(params["notes"]) if params.get("notes") is not None else None,
+            )
+        elif cmd == "get_rds":
+            result = runtime.get_rds_info()
         elif cmd == "audio_buffer_status":
             runtime.update_browser_audio(
                 float(params.get("fill_ms", 0)),
